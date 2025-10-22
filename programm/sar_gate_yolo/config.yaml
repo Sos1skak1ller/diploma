@@ -1,0 +1,38 @@
+input:
+  channels: 1
+  log_transform: true
+  median_ksize: 3
+
+## Качественно (баланс)
+gate:
+  cfar:
+    enabled: true
+    type: "OS"   # q=0.5 — быстрая медиана
+    guard: 2
+    train: 12
+    k: 3.0
+    q: 0.5
+    scale: 0.75
+    scales: [0.6, 0.75, 1.0]
+  mininet:
+    onnx_path: "models/mini_net.onnx"
+    threshold: 0.35
+    stride2: true
+  roi:
+    min_area: 8
+    pad: 20
+    max_side: 512
+    topk: 150
+    dilate: 3
+
+yolo:
+  onnx_path: "models/yolo_cpu.onnx"
+  size: 640
+  conf_thresh: 0.25
+  iou_nms: 0.6
+  use_soft_nms: false
+quant:
+  enable_int8_mininet: true
+  enable_int8_yolo: true
+
+

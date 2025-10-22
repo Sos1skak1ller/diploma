@@ -227,8 +227,12 @@ def create_integrated_interface():
     # Создаем новый интерфейс
     interface = MainInterface()
     
-    # Создаем контроллер
+    # Создаем контроллер и привязываем к интерфейсу
     controller = NewController(interface)
+    try:
+        interface.controller = controller
+    except Exception:
+        pass
     
     # Пытаемся загрузить существующую модель
     existing_model = None

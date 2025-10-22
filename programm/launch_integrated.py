@@ -36,10 +36,10 @@ def check_dependencies():
     """Проверяет зависимости"""
     
     try:
-        import PyQt5
-        print(f"PyQt5 версия: {PyQt5.Qt.PYQT_VERSION_STR}")
-    except ImportError:
-        print("Ошибка: PyQt5 не установлен")
+        from PyQt5 import QtCore
+        print(f"PyQt5 версия: {QtCore.PYQT_VERSION_STR}")
+    except Exception as e:
+        print(f"Ошибка: PyQt5 не установлен или некорректен: {e}")
         return False
         
     # Проверяем наличие необходимых файлов
@@ -98,6 +98,11 @@ def main():
         app.processEvents()
         
         controller = NewController(window)
+        # Привязываем контроллер к интерфейсу для использования в IntegrationBridge
+        try:
+            window.controller = controller
+        except Exception:
+            pass
         
         # Создаем мост интеграции
         splash.showMessage("Настройка интеграции...", Qt.AlignCenter | Qt.AlignBottom, Qt.white)
