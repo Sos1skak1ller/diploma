@@ -225,21 +225,63 @@ class EnhancementWorker(QThread):
     def run(self):
         try:
             self.progress.emit(25, "Анализ качества изображения...")
-            # Здесь должна быть логика улучшения
             
-            self.progress.emit(75, "Применение улучшений...")
+            # Импортируем алгоритм улучшения
+            from src.models.image_enhancement import ImageEnhancement
             
-            # Имитируем результаты
+            # Создаем экземпляр алгоритма
+            enhancer = ImageEnhancement()
+            
+            self.progress.emit(50, "Применение улучшений...")
+            
+            # Определяем метод улучшения для SAR снимков
+            method_map = {
+                'Автоматическое улучшение SAR': 'sar_auto_enhance',
+                'SAR подавление шума': 'sar_denoise',
+                'SAR осветление темных областей': 'sar_brighten',
+                'SAR контрастность': 'sar_contrast',
+                'SAR резкость': 'sar_sharpen',
+                'Комплексное SAR улучшение': 'sar_comprehensive',
+                'AI подавление шума SAR': 'sar_ai_denoise',
+                'AI комплексное улучшение SAR': 'sar_ai_enhance'
+            }
+            
+            method = method_map.get(self.enhance_type, 'baseline')
+            
+            # Применяем улучшение
+            enhanced_img, metrics = enhancer.enhance_image(
+                self.image_path, 
+                method=method, 
+                intensity=self.intensity
+            )
+            
+            if enhanced_img is None:
+                raise RuntimeError("Не удалось улучшить изображение")
+            
+            # Сохраняем улучшенное изображение
+            output_dir = os.path.join(os.path.dirname(self.image_path), 'enhanced')
+            os.makedirs(output_dir, exist_ok=True)
+            
+            base_name = os.path.splitext(os.path.basename(self.image_path))[0]
+            output_path = os.path.join(output_dir, f"{base_name}_enhanced.jpg")
+            
+            success = enhancer.save_enhanced_image(enhanced_img, output_path)
+            
+            if not success:
+                raise RuntimeError("Не удалось сохранить улучшенное изображение")
+            
+            self.progress.emit(100, "Улучшение завершено")
+            
+            # Формируем результаты
             results = {
-                'enhanced_image': self.image_path,  # Путь к улучшенному изображению
-                'quality_metrics': {
-                    'contrast': 0.85,
-                    'brightness': 0.78,
-                    'sharpness': 0.92
+                'enhanced_image': output_path,
+                'quality_metrics': metrics or {
+                    'psnr': 0,
+                    'contrast_improvement': 0,
+                    'brightness_change': 0
                 }
             }
             
-            self.progress.emit(100, "Улучшение завершено")
             self.finished.emit(results)
             
         except Exception as e:
@@ -442,14 +484,18 @@ class NewController:
         if 'enhanced_image' in results:
             self.view.enhance_result_view.set_image(results['enhanced_image'])
             
-        # Показываем метрики качества
+        # Показываем метрики качества в интерфейсе
         if 'quality_metrics' in results:
             metrics = results['quality_metrics']
-            message = f"Метрики качества:\n"
-            message += f"Контрастность: {metrics['contrast']:.2f}\n"
-            message += f"Яркость: {metrics['brightness']:.2f}\n"
-            message += f"Резкость: {metrics['sharpness']:.2f}"
-            QMessageBox.information(self.view, "Результаты улучшения", message)
+            quality_text = f"Метрики качества SAR улучшения:\n\n"
+            quality_text += f"PSNR: {metrics.get('psnr', 0):.2f} dB\n"
+            quality_text += f"Улучшение контраста: {metrics.get('contrast_improvement', 0):.1f}%\n"
+            quality_text += f"Изменение яркости: {metrics.get('brightness_change', 0):.1f}%\n"
+            quality_text += f"Оригинальный контраст: {metrics.get('original_contrast', 0):.2f}\n"
+            quality_text += f"Улучшенный контраст: {metrics.get('enhanced_contrast', 0):.2f}"
+            
+            # Обновляем информацию о качестве в интерфейсе
+            self.view.quality_info.setText(quality_text)
             
     def on_enhancement_error(self, error_message):
         """Обработка ошибки улучшения"""

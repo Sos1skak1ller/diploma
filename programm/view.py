@@ -60,8 +60,8 @@ class MyGraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
         self._pan_start = QPointF()
         self._panning = False
@@ -90,14 +90,32 @@ class MyGraphicsView(QGraphicsView):
 
     def wheelEvent(self, event: QWheelEvent):
         """Обработка масштабирования колесиком мыши"""
+        # Получаем позицию мыши относительно сцены
+        mouse_pos = event.pos()
+        scene_pos = self.mapToScene(mouse_pos)
+        
+        # Определяем направление масштабирования
         zoom_in = event.angleDelta().y() > 0
         
         if zoom_in and self.current_scale < self.max_zoom:
+            # Масштабируем к позиции мыши
             self.scale(self.zoom_factor, self.zoom_factor)
             self.current_scale *= self.zoom_factor
+            
+            # Центрируем на позиции мыши
+            new_pos = self.mapToScene(mouse_pos)
+            delta = new_pos - scene_pos
+            self.translate(delta.x(), delta.y())
+            
         elif not zoom_in and self.current_scale > self.min_zoom:
+            # Масштабируем от позиции мыши
             self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
             self.current_scale /= self.zoom_factor
+            
+            # Центрируем на позиции мыши
+            new_pos = self.mapToScene(mouse_pos)
+            delta = new_pos - scene_pos
+            self.translate(delta.x(), delta.y())
 
     def mousePressEvent(self, event: QMouseEvent):
         """Обработка нажатий мыши"""
