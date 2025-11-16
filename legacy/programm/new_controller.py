@@ -243,7 +243,8 @@ class EnhancementWorker(QThread):
                 'SAR резкость': 'sar_sharpen',
                 'Комплексное SAR улучшение': 'sar_comprehensive',
                 'AI подавление шума SAR': 'sar_ai_denoise',
-                'AI комплексное улучшение SAR': 'sar_ai_enhance'
+                'AI комплексное улучшение SAR': 'sar_ai_enhance',
+                'SAR морфологическое улучшение': 'sar_morphological_enhance'
             }
             
             method = method_map.get(self.enhance_type, 'baseline')

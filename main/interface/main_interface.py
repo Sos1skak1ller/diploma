@@ -8,7 +8,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
                              QComboBox, QCheckBox, QListWidget, QListWidgetItem)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRectF, QPointF
 from PyQt5.QtGui import QPixmap, QWheelEvent, QMouseEvent, QFont, QPalette, QColor
-from view import MyGraphicsView, TableWidget
+from .view import MyGraphicsView, TableWidget
+
 
 class MainInterface(QMainWindow):
     def __init__(self):
@@ -386,7 +387,8 @@ class MainInterface(QMainWindow):
             "SAR резкость",
             "Комплексное SAR улучшение",
             "AI подавление шума SAR",
-            "AI комплексное улучшение SAR"
+            "AI комплексное улучшение SAR",
+            "SAR морфологическое улучшение"
         ])
         enhance_layout.addWidget(self.enhance_type_combo)
         
@@ -529,7 +531,13 @@ class MainInterface(QMainWindow):
             "AI комплексное улучшение SAR": 
                 "Полный AI-пайплайн улучшения SAR снимков.\n"
                 "Включает: AI-подавление шума + адаптивное осветление + CLAHE.\n"
-                "Современные нейронные сети для максимального качества."
+                "Современные нейронные сети для максимального качества.",
+                
+            "SAR морфологическое улучшение": 
+                "Новый алгоритм на основе морфологических операций.\n"
+                "Использует: морфологическое открытие/закрытие + адаптивная фильтрация.\n"
+                "Селективное усиление границ объектов с сохранением деталей.\n"
+                "Эффективно для улучшения структуры и контраста SAR изображений."
         }
         
         self.param_info.setText(info_text.get(enhance_type, "Информация недоступна"))
@@ -557,11 +565,15 @@ class MainInterface(QMainWindow):
                     pass
         event.accept()
 
+
 def main():
     app = QApplication(sys.argv)
     window = MainInterface()
     window.show()
     sys.exit(app.exec_())
 
+
 if __name__ == '__main__':
     main()
+
+

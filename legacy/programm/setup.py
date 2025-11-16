@@ -8,7 +8,7 @@ import os
 
 # Читаем README файл
 def read_readme():
-    readme_path = os.path.join(os.path.dirname(__file__), 'README_new_interface.md')
+    readme_path = os.path.join(os.path.dirname(__file__), 'README.md')
     if os.path.exists(readme_path):
         with open(readme_path, 'r', encoding='utf-8') as f:
             return f.read()

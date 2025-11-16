@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: satellite-image-analyzer
+Version: 2.0.0
+Summary: Система анализа спутниковых снимков (GUI + алгоритмы детекции/улучшения SAR)
+Author: Diplom Project
+Project-URL: homepage, https://example.com
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: PyQt5==5.15.10
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: opencv-python>=4.9.0
+Requires-Dist: Pillow>=9.0.0
+Requires-Dist: requests>=2.25.0
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: torch>=2.0.0
+Requires-Dist: torchvision>=0.15.0
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: flake8; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Provides-Extra: onnx
+Requires-Dist: onnxruntime>=1.16.0; extra == "onnx"
