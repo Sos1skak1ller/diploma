@@ -320,6 +320,41 @@ class MainInterface(QMainWindow):
         self.roi_sensitivity_slider.setValue(50)
         roi_layout.addWidget(self.roi_sensitivity_slider)
         
+        # Порог яркости (мин/макс)
+        roi_layout.addWidget(QLabel("Яркость областей (мин/макс):"))
+        br_layout = QGridLayout()
+        self.roi_brightness_min_label = QLabel("0")
+        self.roi_brightness_min_slider = QSlider(Qt.Horizontal)
+        self.roi_brightness_min_slider.setRange(0, 255)
+        self.roi_brightness_min_slider.setValue(0)
+        br_layout.addWidget(QLabel("Мин:"), 0, 0)
+        br_layout.addWidget(self.roi_brightness_min_slider, 0, 1)
+        br_layout.addWidget(self.roi_brightness_min_label, 0, 2)
+        
+        self.roi_brightness_max_label = QLabel("255")
+        self.roi_brightness_max_slider = QSlider(Qt.Horizontal)
+        self.roi_brightness_max_slider.setRange(0, 255)
+        self.roi_brightness_max_slider.setValue(255)
+        br_layout.addWidget(QLabel("Макс:"), 1, 0)
+        br_layout.addWidget(self.roi_brightness_max_slider, 1, 1)
+        br_layout.addWidget(self.roi_brightness_max_label, 1, 2)
+        
+        # Обновление меток и ограничение min<=max
+        def _update_brightness_labels():
+            mn = self.roi_brightness_min_slider.value()
+            mx = self.roi_brightness_max_slider.value()
+            if mn > mx:
+                # поддерживаем инвариант: min <= max
+                self.roi_brightness_min_slider.setValue(mx)
+                mn = mx
+            self.roi_brightness_min_label.setText(str(mn))
+            self.roi_brightness_max_label.setText(str(mx))
+        self.roi_brightness_min_slider.valueChanged.connect(_update_brightness_labels)
+        self.roi_brightness_max_slider.valueChanged.connect(_update_brightness_labels)
+        _update_brightness_labels()
+        
+        roi_layout.addLayout(br_layout)
+        
         self.roi_analyze_btn = QPushButton("Анализировать зоны")
         roi_layout.addWidget(self.roi_analyze_btn)
         

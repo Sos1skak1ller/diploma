@@ -97,11 +97,13 @@ class ROIWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
     
-    def __init__(self, image_path, roi_type, sensitivity):
+    def __init__(self, image_path, roi_type, sensitivity, bright_min, bright_max):
         super().__init__()
         self.image_path = image_path
         self.roi_type = roi_type
         self.sensitivity = sensitivity
+        self.bright_min = int(max(0, min(255, bright_min)))
+        self.bright_max = int(max(0, min(255, bright_max)))
         
     def run(self):
         try:
@@ -153,61 +155,62 @@ class ROIWorker(QThread):
 
             self.progress.emit(40, "Запуск детекции во вкладке ROI...")
 
-            # Проверяем YOLO модель
-            yolo_rel = str(cfg.get('yolo', {}).get('onnx_path', 'models/yolo_cpu.onnx'))
-            yolo_path = yolo_rel if os.path.isabs(yolo_rel) else os.path.join(pkg_dir, yolo_rel)
-            use_yolo = os.path.exists(yolo_path) and run_pipeline is not None
-
             vis_out_dir = tmp_dir
             vis_out = os.path.join(vis_out_dir, os.path.basename(self.image_path))
 
-            if use_yolo:
-                results_map = run_pipeline(self.image_path, tmp_cfg_path, save_vis=vis_out_dir, save_json_dir=None)
-                dets = results_map.get(self.image_path, [])
-                count = int(len(dets))
-                out_img = vis_out if os.path.exists(vis_out) else self.image_path
-                results = {
-                    'count': count,
-                    'image_with_boxes': out_img
-                }
-            else:
-                # Gate-only fallback с подавлением пересечений и визуализацией ROI
-                img = cv2.imread(self.image_path, cv2.IMREAD_UNCHANGED)
-                if img is None:
-                    raise RuntimeError("Не удалось загрузить изображение")
-                gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                rois_raw = run_gate(gray, cfg) if run_gate is not None else []
+            # ROI анализ с фильтром по яркости и подавлением пересечений
+            img = cv2.imread(self.image_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise RuntimeError("Не удалось загрузить изображение")
+            gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            rois_raw = run_gate(gray, cfg) if run_gate is not None else []
 
-                # Простая NMS для ROI по IoU
-                def iou(a, b):
-                    ax1, ay1, ax2, ay2 = a[0], a[1], a[2], a[3]
-                    bx1, by1, bx2, by2 = b[0], b[1], b[2], b[3]
-                    inter_x1 = max(ax1, bx1)
-                    inter_y1 = max(ay1, by1)
-                    inter_x2 = min(ax2, bx2)
-                    inter_y2 = min(ay2, by2)
-                    iw = max(0, inter_x2 - inter_x1)
-                    ih = max(0, inter_y2 - inter_y1)
-                    inter = iw * ih
-                    area_a = max(0, (ax2 - ax1)) * max(0, (ay2 - ay1))
-                    area_b = max(0, (bx2 - bx1)) * max(0, (by2 - by1))
-                    union = area_a + area_b - inter + 1e-6
-                    return inter / union
+            # Простая NMS для ROI по IoU
+            def iou(a, b):
+                ax1, ay1, ax2, ay2 = a[0], a[1], a[2], a[3]
+                bx1, by1, bx2, by2 = b[0], b[1], b[2], b[3]
+                inter_x1 = max(ax1, bx1)
+                inter_y1 = max(ay1, by1)
+                inter_x2 = min(ax2, bx2)
+                inter_y2 = min(ay2, by2)
+                iw = max(0, inter_x2 - inter_x1)
+                ih = max(0, inter_y2 - inter_y1)
+                inter = iw * ih
+                area_a = max(0, (ax2 - ax1)) * max(0, (ay2 - ay1))
+                area_b = max(0, (bx2 - bx1)) * max(0, (by2 - by1))
+                union = area_a + area_b - inter + 1e-6
+                return inter / union
 
-                rois = []
-                rois_sorted = sorted(rois_raw, key=lambda r: (r[2]-r[0])*(r[3]-r[1]), reverse=True)
-                for r in rois_sorted:
-                    if all(iou(r, k) < 0.7 for k in rois):
-                        rois.append(r)
+            rois_nms = []
+            rois_sorted = sorted(rois_raw, key=lambda r: (r[2]-r[0])*(r[3]-r[1]), reverse=True)
+            for r in rois_sorted:
+                if all(iou(r, k) < 0.7 for k in rois_nms):
+                    rois_nms.append(r)
 
-                vis = img.copy() if img.ndim == 3 else cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                for x1, y1, x2, y2 in [(r[0], r[1], r[2], r[3]) for r in rois]:
-                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                cv2.imwrite(vis_out, vis)
-                results = {
-                    'count': int(len(rois)),
-                    'image_with_boxes': vis_out
-                }
+            # Подсчет яркости каждой области и фильтрация по диапазону
+            regions = []
+            for (x1, y1, x2, y2) in [(r[0], r[1], r[2], r[3]) for r in rois_nms]:
+                x1c, y1c = max(0, x1), max(0, y1)
+                x2c, y2c = min(gray.shape[1], x2), min(gray.shape[0], y2)
+                if x2c <= x1c or y2c <= y1c:
+                    continue
+                patch = gray[y1c:y2c, x1c:x2c]
+                mean_brightness = float(np.mean(patch))
+                if self.bright_min <= mean_brightness <= self.bright_max:
+                    regions.append((x1c, y1c, x2c, y2c, mean_brightness))
+
+            # Визуализация отфильтрованных областей и подписи яркости
+            vis = img.copy() if img.ndim == 3 else cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            for x1, y1, x2, y2, mb in regions:
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                cv2.putText(vis, f"{mb:.1f}", (x1, max(0, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,255), 1, cv2.LINE_AA)
+            cv2.imwrite(vis_out, vis)
+
+            results = {
+                'count': int(len(regions)),
+                'image_with_boxes': vis_out,
+                'regions': [{'x1':x1,'y1':y1,'x2':x2,'y2':y2,'brightness':mb} for x1,y1,x2,y2,mb in regions]
+            }
 
             self.progress.emit(100, "Анализ завершен")
             self.finished.emit(results)
@@ -424,7 +427,10 @@ class NewController:
         
         self.set_ui_enabled(False)
         
-        worker = ROIWorker(image_path, roi_type, sensitivity)
+        # Яркость из интерфейса
+        bright_min = self.view.roi_brightness_min_slider.value()
+        bright_max = self.view.roi_brightness_max_slider.value()
+        worker = ROIWorker(image_path, roi_type, sensitivity, bright_min, bright_max)
         worker.progress.connect(self.view.update_progress)
         worker.finished.connect(self.on_roi_finished)
         worker.error.connect(self.on_roi_error)
@@ -444,7 +450,11 @@ class NewController:
         self.view.roi_results_list.clear()
         if 'image_with_boxes' in results:
             cnt = int(results.get('count', 0))
-            self.view.roi_results_list.addItem(f"Найдено объектов: {cnt}")
+            self.view.roi_results_list.addItem(f"Найдено областей: {cnt}")
+            # Выводим яркость каждой области
+            if 'regions' in results:
+                for r in results['regions']:
+                    self.view.roi_results_list.addItem(f"({r['x1']},{r['y1']})-({r['x2']},{r['y2']}): ярк. {r['brightness']:.1f}")
             self.view.roi_analysis_view.set_image(results['image_with_boxes'])
         elif 'roi_image' in results:
             # Fallback старого формата
