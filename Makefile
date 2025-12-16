@@ -9,7 +9,6 @@ VENV = .venv
 help:
 	@echo "Команды:"
 	@echo "  make venv      - создать виртуальное окружение (venv)"
-	@echo "  make pdm-env   - установить зависимости через PDM (если установлен)"
 	@echo "  make install   - установить зависимости в активное окружение"
 	@echo "  make run       - запустить основное приложение (GUI)"
 	@echo "  make demo      - запустить демо-интерфейс"
@@ -20,15 +19,8 @@ venv:
 	$(PYTHON) -m venv $(VENV)
 	@echo "Активируйте окружение командой: source $(VENV)/bin/activate"
 
-pdm-env:
-	@if command -v pdm >/dev/null 2>&1; then \
-		pdm install; \
-	else \
-		echo "PDM не установлен. Установите: pip install pdm"; \
-	fi
-
 install:
-	$(PIP) install -r programm/requirements.txt
+	$(PIP) install -r requirements.txt
 
 run:
 	$(PYTHON) -m main.interface.run_interface

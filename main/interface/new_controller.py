@@ -243,20 +243,16 @@ class EnhancementWorker(QThread):
             
             self.progress.emit(50, "Применение улучшений...")
             
-            # Определяем метод улучшения для SAR снимков
             method_map = {
-                'Автоматическое улучшение SAR': 'sar_auto_enhance',
-                'SAR подавление шума': 'sar_denoise',
-                'SAR осветление темных областей': 'sar_brighten',
-                'SAR контрастность': 'sar_contrast',
-                'SAR резкость': 'sar_sharpen',
-                'Комплексное SAR улучшение': 'sar_comprehensive',
-                'AI подавление шума SAR': 'sar_ai_denoise',
-                'AI комплексное улучшение SAR': 'sar_ai_enhance',
-                'SAR морфологическое улучшение': 'sar_morphological_enhance'
+                # гибридное подавление шума (bilateral + NLM)
+                'Гибридное подавление шума SAR': 'hybrid_sar_denoise',
+                # адаптивный фильтр спекла
+                'Адаптивное подавление спекла SAR': 'sar_adaptive',
+                # анизотропная диффузия
+                'Анизотропная диффузия SAR': 'sar_srad',
             }
             
-            method = method_map.get(self.enhance_type, 'baseline')
+            method = method_map.get(self.enhance_type, 'hybrid_sar_denoise')
             
             # Применяем улучшение
             enhanced_img, metrics = enhancer.enhance_image(
@@ -302,6 +298,9 @@ class NewController:
     def __init__(self, view):
         self.view = view
         self.current_workers = []
+        # Флаг и путь для последовательного пайплайна улучшение → ROI → YOLO
+        self.pipeline_active = False
+        self.pipeline_image_path = None
         self.setup_connections()
         
     def setup_connections(self):
@@ -319,6 +318,9 @@ class NewController:
         
         # Вкладка улучшения качества
         self.view.enhance_btn.clicked.connect(self.start_enhancement)
+        # Полный конвейер: улучшение → ROI → YOLO
+        if hasattr(self.view, "enhance_pipeline_btn"):
+            self.view.enhance_pipeline_btn.clicked.connect(self.start_full_pipeline)
         self.view.enhance_preview_btn.clicked.connect(self.preview_enhancement)
         self.view.enhance_save_btn.clicked.connect(self.save_enhanced_image)
         
@@ -359,18 +361,8 @@ class NewController:
             f"Широта: {lat}, Долгота: {lon}, Масштаб: {scale}"
         )
         
-    def start_detection(self):
-        """Запуск детекции объектов"""
-        if self.view.file_list.count() == 0:
-            self.view.show_error("Выберите изображения для анализа")
-            return
-            
-        # Получаем первый выбранный файл
-        item = self.view.file_list.item(0)
-        if not item:
-            return
-            
-        image_path = item.data(1)
+    def _run_detection_for_image(self, image_path: str):
+        """Внутренний запуск детекции объектов для указанного изображения"""
         confidence = self.view.confidence_slider.value() / 100.0
         
         # Отключаем кнопки во время обработки
@@ -388,6 +380,18 @@ class NewController:
         # Показываем оригинальное изображение
         self.view.original_view.set_image(image_path)
         
+    def start_detection(self):
+        """Запуск детекции объектов для первого изображения в списке"""
+        if self.view.file_list.count() == 0:
+            self.view.show_error("Выберите изображения для анализа")
+            return
+            
+        item = self.view.file_list.item(0)
+        if not item:
+            return
+        image_path = item.data(1)
+        self._run_detection_for_image(image_path)
+        
     def on_detection_finished(self, results):
         """Обработка завершения детекции"""
         self.set_ui_enabled(True)
@@ -402,6 +406,11 @@ class NewController:
         # Показываем изображение с детекцией
         if 'image_with_boxes' in results:
             self.view.prediction_view.set_image(results['image_with_boxes'])
+        
+        # Завершаем последовательный пайплайн, если он был активен
+        if self.pipeline_active:
+            self.pipeline_active = False
+            self.pipeline_image_path = None
             
     def on_detection_error(self, error_message):
         """Обработка ошибки детекции"""
@@ -411,17 +420,8 @@ class NewController:
         hint = "\n\nПодсказка: убедитесь, что установлен onnxruntime (pip install -r requirements.txt) и файл модели YOLO расположен по пути main/algorythms/area_selection/sar_gate_yolo/models/yolo_cpu.onnx."
         self.view.show_error(f"Ошибка детекции: {error_message}{hint}")
         
-    def start_roi_analysis(self):
-        """Запуск анализа зон интересов"""
-        if self.view.file_list.count() == 0:
-            self.view.show_error("Выберите изображения для анализа")
-            return
-            
-        item = self.view.file_list.item(0)
-        if not item:
-            return
-            
-        image_path = item.data(1)
+    def _run_roi_analysis_for_image(self, image_path: str):
+        """Внутренний запуск анализа зон интересов для указанного изображения"""
         roi_type = self.view.roi_type_combo.currentText()
         sensitivity = self.view.roi_sensitivity_slider.value()
         
@@ -441,6 +441,18 @@ class NewController:
         # Показываем исходное изображение
         self.view.roi_source_view.set_image(image_path)
         
+    def start_roi_analysis(self):
+        """Запуск анализа зон интересов для первого изображения в списке"""
+        if self.view.file_list.count() == 0:
+            self.view.show_error("Выберите изображения для анализа")
+            return
+            
+        item = self.view.file_list.item(0)
+        if not item:
+            return
+        image_path = item.data(1)
+        self._run_roi_analysis_for_image(image_path)
+        
     def on_roi_finished(self, results):
         """Обработка завершения анализа ROI"""
         self.set_ui_enabled(True)
@@ -459,6 +471,10 @@ class NewController:
         elif 'roi_image' in results:
             # Fallback старого формата
             self.view.roi_analysis_view.set_image(results['roi_image'])
+        
+        # Если активен полнофункциональный пайплайн, запускаем следующий этап — детекцию (YOLO)
+        if self.pipeline_active and self.pipeline_image_path:
+            self._run_detection_for_image(self.pipeline_image_path)
             
     def on_roi_error(self, error_message):
         """Обработка ошибки анализа ROI"""
@@ -492,6 +508,81 @@ class NewController:
         
         # Показываем исходное изображение
         self.view.enhance_original_view.set_image(image_path)
+        
+    def start_full_pipeline(self):
+        """
+        Полный SAR‑пайплайн:
+        1) Улучшение изображения выбранным алгоритмом;
+        2) Анализ зон интересов (ROI);
+        3) Детекция / классификация (YOLO) по улучшенному изображению.
+        """
+        if self.view.file_list.count() == 0:
+            self.view.show_error("Выберите изображения для анализа")
+            return
+            
+        item = self.view.file_list.item(0)
+        if not item:
+            return
+            
+        image_path = item.data(1)
+        enhance_type = self.view.enhance_type_combo.currentText()
+        intensity = self.view.enhance_intensity_slider.value()
+        
+        try:
+            # Импортируем алгоритм улучшения
+            from main.algorythms.improvment.image_enhancement import ImageEnhancement
+            enhancer = ImageEnhancement()
+            
+            # Маппинг текста интерфейса на внутренние методы
+            method_map = {
+                'Гибридное подавление шума SAR': 'hybrid_sar_denoise',
+                'Адаптивное подавление спекла SAR': 'sar_adaptive',
+                'Анизотропная диффузия SAR': 'sar_srad',
+            }
+            method = method_map.get(enhance_type, 'hybrid_sar_denoise')
+            
+            # Шаг 1: улучшение изображения (синхронно в GUI‑потоке, для простоты)
+            self.set_ui_enabled(False)
+            enhanced_img, metrics = enhancer.enhance_image(
+                image_path,
+                method=method,
+                intensity=intensity,
+            )
+            if enhanced_img is None:
+                self.set_ui_enabled(True)
+                self.view.show_error("Не удалось улучшить изображение в полном пайплайне")
+                return
+            
+            # Сохраняем улучшенное изображение во временную директорию
+            tmp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tmp')
+            tmp_dir = os.path.abspath(tmp_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            enhanced_path = os.path.join(tmp_dir, f"{base_name}_pipeline_enhanced.jpg")
+            enhancer.save_enhanced_image(enhanced_img, enhanced_path)
+            
+            # Обновляем вкладку улучшения
+            self.view.enhance_original_view.set_image(image_path)
+            self.view.enhance_result_view.set_image(enhanced_path)
+            if metrics:
+                quality_text = f"Метрики качества SAR улучшения (полный пайплайн):\n\n"
+                quality_text += f"PSNR: {metrics.get('psnr', 0):.2f} dB\n"
+                quality_text += f"Улучшение контраста: {metrics.get('contrast_improvement', 0):.1f}%\n"
+                quality_text += f"Изменение яркости: {metrics.get('brightness_change', 0):.1f}%\n"
+                quality_text += f"Оригинальный контраст: {metrics.get('original_contrast', 0):.2f}\n"
+                quality_text += f"Улучшенный контраст: {metrics.get('enhanced_contrast', 0):.2f}"
+                self.view.quality_info.setText(quality_text)
+            
+            # Включаем режим последовательного пайплайна и запоминаем путь
+            self.pipeline_active = True
+            self.pipeline_image_path = enhanced_path
+            
+            # Шаг 2: ROI‑анализ по улучшенному изображению (асинхронно)
+            self._run_roi_analysis_for_image(enhanced_path)
+            
+        except Exception as e:
+            self.set_ui_enabled(True)
+            self.view.show_error(f"Ошибка полного пайплайна: {e}")
         
     def on_enhancement_finished(self, results):
         """Обработка завершения улучшения"""
@@ -569,6 +660,8 @@ class NewController:
         self.view.enhance_intensity_slider.setEnabled(enabled)
         self.view.enhance_preview_btn.setEnabled(enabled)
         self.view.enhance_save_btn.setEnabled(enabled)
+        if hasattr(self.view, "enhance_pipeline_btn"):
+            self.view.enhance_pipeline_btn.setEnabled(enabled)
         
         if not enabled:
             self.view.progress_bar.setVisible(True)

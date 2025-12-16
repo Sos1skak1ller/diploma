@@ -59,13 +59,13 @@ def test_enhancement():
         # Создаем экземпляр алгоритма
         enhancer = ImageEnhancement()
         print("✓ Экземпляр алгоритма создан")
-
-        # Тестируем baseline улучшение
-        print("Тестирование baseline улучшения...")
-        enhanced, metrics = enhancer.enhance_image(test_img, "baseline", 50)
+        
+        # Тестируем AI-подавление шума (основной используемый пайплайн)
+        print("Тестирование AI подавления шума SAR...")
+        enhanced, metrics = enhancer.enhance_image(test_img, "sar_ai_denoise", 50)
 
         if enhanced is not None:
-            print("✓ Baseline улучшение работает")
+            print("✓ AI подавление шума работает")
             print(f"Метрики качества: {metrics}")
         else:
             print("✗ Ошибка в baseline улучшении")

@@ -4,6 +4,7 @@
 """
 
 import os
+import cv2
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QSizePolicy,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
@@ -11,7 +12,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QSlider, QSpinBox, QComboBox, QCheckBox, QGroupBox,
                              QGridLayout, QTextEdit, QProgressBar)
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPixmap, QWheelEvent, QMouseEvent, QFont, QPainter, QPen
+from PyQt5.QtGui import QPixmap, QWheelEvent, QMouseEvent, QFont, QPainter, QPen, QImage
 
 from .view import TableWidget
 
@@ -164,12 +165,27 @@ class EnhancedGraphicsView(QGraphicsView):
         if not os.path.exists(image_path):
             print(f"Файл не найден: {image_path}")
             return
-            
-        pixmap = QPixmap(image_path)
-        if pixmap.isNull():
-            print(f"Ошибка загрузки изображения: {image_path}")
+
+        # Используем OpenCV для стабильной загрузки без зависимости от Qt image plugins
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            print(f"Ошибка загрузки изображения (OpenCV): {image_path}")
             return
-            
+
+        if img.ndim == 2:
+            h, w = img.shape
+            qimg = QImage(img.data, w, h, w, QImage.Format_Grayscale8)
+        else:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            h, w, ch = img_rgb.shape
+            bytes_per_line = ch * w
+            qimg = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+
+        pixmap = QPixmap.fromImage(qimg)
+        if pixmap.isNull():
+            print(f"Ошибка конвертации изображения в QPixmap: {image_path}")
+            return
+
         self.pixmap_item.setPixmap(pixmap)
         self.scene.setSceneRect(QRectF(pixmap.rect()))
         

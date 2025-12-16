@@ -21,3 +21,8 @@ venv/
 .coverage.xml.gz
 .coverage.xml.gz.part
 .coverage.xml.gz.part.1
+
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*.pyo
