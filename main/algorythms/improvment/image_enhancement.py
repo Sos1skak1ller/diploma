@@ -146,6 +146,35 @@ class ImageEnhancement:
             print(f"Ошибка в anisotropic diffusion: {e}")
             return image
 
+    def enhance_array(
+        self,
+        image: np.ndarray,
+        method: str = "hybrid_sar_denoise",
+        intensity: int = 50,
+    ) -> np.ndarray:
+        """
+        Упрощённое улучшение уже загруженного изображения (np.ndarray).
+        Используется для маленьких ROI‑кропов перед классификацией SAR-HUB.
+        Метрики качества здесь не считаются — только фильтрация.
+        """
+        try:
+            if image is None:
+                return image
+
+            if method in ("sar_ai_denoise", "hybrid_sar_denoise"):
+                return self._apply_fallback_denoising(image, intensity)
+            elif method == "sar_adaptive":
+                return self._adaptive_speckle_filter(image, intensity)
+            elif method == "sar_srad":
+                return self._anisotropic_diffusion(image, intensity)
+            else:
+                print(f"Предупреждение: неизвестный метод '{method}' в enhance_array, используется fallback‑пайплайн")
+                return self._apply_fallback_denoising(image, intensity)
+
+        except Exception as e:
+            print(f"Ошибка в enhance_array: {e}")
+            return image
+
     def enhance_image(
         self,
         image_path: str,

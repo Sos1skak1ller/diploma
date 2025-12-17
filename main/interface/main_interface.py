@@ -215,6 +215,7 @@ class MainInterface(QMainWindow):
         self.send_coords_btn = QPushButton("Отправить координаты")
         coords_layout.addWidget(self.send_coords_btn, 5, 0, 1, 2)
         
+        # Блок координат снова добавляем в основной интерфейс
         layout.addWidget(coords_group)
         
         # Группа загрузки файлов
@@ -243,7 +244,7 @@ class MainInterface(QMainWindow):
         
         layout.addWidget(upload_group)
         
-        # Группа настроек
+        # Группа настроек детекции
         settings_group = QGroupBox("Настройки детекции")
         settings_layout = QVBoxLayout(settings_group)
         
@@ -254,6 +255,22 @@ class MainInterface(QMainWindow):
         settings_layout.addWidget(self.save_results_btn)
         
         layout.addWidget(settings_group)
+
+        # Группа классификации SAR-HUB
+        sarhub_group = QGroupBox("Классификация сцены (SAR-HUB ResNet-18 TSX)")
+        sarhub_layout = QVBoxLayout(sarhub_group)
+
+        self.sarhub_classify_btn = QPushButton("Классифицировать SAR сцену")
+        sarhub_layout.addWidget(self.sarhub_classify_btn)
+
+        self.sarhub_status_label = QLabel("Модель не запущена")
+        sarhub_status_font = self.sarhub_status_label.font()
+        sarhub_status_font.setPointSize(9)
+        self.sarhub_status_label.setFont(sarhub_status_font)
+        self.sarhub_status_label.setStyleSheet("color: #cccccc;")
+        sarhub_layout.addWidget(self.sarhub_status_label)
+
+        layout.addWidget(sarhub_group)
         
         layout.addStretch()
         return panel
@@ -280,6 +297,21 @@ class MainInterface(QMainWindow):
         prediction_layout = QVBoxLayout(prediction_group)
         self.prediction_view = MyGraphicsView()
         prediction_layout.addWidget(self.prediction_view)
+
+        # Навигация по зонам (ROI), для которых выполнена классификация SAR-HUB
+        nav_layout = QHBoxLayout()
+        self.sarhub_prev_btn = QPushButton("←")
+        self.sarhub_next_btn = QPushButton("→")
+        self.sarhub_roi_info_label = QLabel("Зона 0 / 0")
+        self.sarhub_roi_info_label.setStyleSheet("color: #cccccc; font-size: 11px;")
+
+        nav_layout.addWidget(self.sarhub_prev_btn)
+        nav_layout.addWidget(self.sarhub_next_btn)
+        nav_layout.addWidget(self.sarhub_roi_info_label)
+        nav_layout.addStretch()
+
+        prediction_layout.addLayout(nav_layout)
+
         images_layout.addWidget(prediction_group)
         
         layout.addLayout(images_layout)

@@ -156,7 +156,11 @@ class ROIWorker(QThread):
             self.progress.emit(40, "Запуск детекции во вкладке ROI...")
 
             vis_out_dir = tmp_dir
-            vis_out = os.path.join(vis_out_dir, os.path.basename(self.image_path))
+            # Для визуализаций используем отдельный файл, чтобы не перетирать
+            # исходное (например, уже улучшенное) изображение.
+            base_name = os.path.basename(self.image_path)
+            root, ext = os.path.splitext(base_name)
+            vis_out = os.path.join(vis_out_dir, f"{root}_roi{ext or '.jpg'}")
 
             # ROI анализ с фильтром по яркости и подавлением пересечений
             img = cv2.imread(self.image_path, cv2.IMREAD_UNCHANGED)
@@ -264,7 +268,7 @@ class EnhancementWorker(QThread):
             if enhanced_img is None:
                 raise RuntimeError("Не удалось улучшить изображение")
             
-            # Сохраняем улучшенное изображение
+            # Сохраняем улучшенное изображение рядом с исходным (папка enhanced)
             output_dir = os.path.join(os.path.dirname(self.image_path), 'enhanced')
             os.makedirs(output_dir, exist_ok=True)
             
@@ -272,9 +276,16 @@ class EnhancementWorker(QThread):
             output_path = os.path.join(output_dir, f"{base_name}_enhanced.jpg")
             
             success = enhancer.save_enhanced_image(enhanced_img, output_path)
-            
             if not success:
                 raise RuntimeError("Не удалось сохранить улучшенное изображение")
+
+            # Дополнительно сохраняем такое же улучшенное изображение в общую tmp‑директорию,
+            # чтобы все промежуточные результаты были в одном месте.
+            tmp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tmp')
+            tmp_dir = os.path.abspath(tmp_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_path = os.path.join(tmp_dir, os.path.basename(output_path))
+            enhancer.save_enhanced_image(enhanced_img, tmp_path)
             
             self.progress.emit(100, "Улучшение завершено")
             
@@ -294,6 +305,105 @@ class EnhancementWorker(QThread):
             self.error.emit(str(e))
 
 
+class SarHubClassificationWorker(QThread):
+    """Поток для классификации зон интересов с помощью SAR-HUB ResNet-18 TSX"""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        image_path: str,
+        regions: list,
+        weights_path: str,
+        enhance_method: str | None = None,
+        enhance_intensity: int | None = None,
+        labels_path: str | None = None,
+        topk: int = 3,
+    ):
+        super().__init__()
+        self.image_path = image_path
+        self.regions = regions  # список словарей с ключами x1,y1,x2,y2,...
+        self.weights_path = weights_path
+        self.enhance_method = enhance_method
+        self.enhance_intensity = enhance_intensity
+        self.labels_path = labels_path
+        self.topk = topk
+
+    def run(self):
+        try:
+            from pathlib import Path
+            from PIL import Image
+            from main.algorythms.area_selection.sar_hub_resnet18_inference import classify_pil_image
+            from main.algorythms.improvment.image_enhancement import ImageEnhancement
+
+            self.progress.emit(15, "Загрузка модели SAR-HUB...")
+
+            weights_p = Path(self.weights_path)
+            if not weights_p.is_file():
+                raise FileNotFoundError(f"Файл весов SAR-HUB не найден: {weights_p}")
+
+            labels_p = Path(self.labels_path) if self.labels_path else None
+
+            img_path = Path(self.image_path)
+            if not img_path.is_file():
+                raise FileNotFoundError(f"Изображение для SAR-HUB не найдено: {img_path}")
+
+            full_img = Image.open(img_path)
+            enhancer = ImageEnhancement()
+            # Метод и интенсивность для маленьких блоков: либо явные, либо мягкий дефолт
+            roi_method = self.enhance_method or "hybrid_sar_denoise"
+            roi_intensity = int(self.enhance_intensity if self.enhance_intensity is not None else 50)
+
+            roi_results = []
+            total = max(1, len(self.regions))
+            for i, r in enumerate(self.regions):
+                # Прогресс по зонам
+                frac = (i / total)
+                self.progress.emit(20 + int(70 * frac), f"Классификация зоны {i+1}/{len(self.regions)}...")
+
+                x1, y1, x2, y2 = int(r["x1"]), int(r["y1"]), int(r["x2"]), int(r["y2"])
+                # Защита от выхода за границы
+                w, h = full_img.size
+                x1c, y1c = max(0, x1), max(0, y1)
+                x2c, y2c = min(w, x2), min(h, y2)
+                if x2c <= x1c or y2c <= y1c:
+                    continue
+
+                crop = full_img.crop((x1c, y1c, x2c, y2c))
+
+                # Дополнительное улучшение качества для маленького блока
+                crop_np = np.array(crop)
+                crop_np = enhancer.enhance_array(crop_np, method=roi_method, intensity=roi_intensity)
+                crop = Image.fromarray(crop_np)
+                cls_res = classify_pil_image(
+                    img=crop,
+                    weights_path=weights_p,
+                    labels_path=labels_p,
+                    topk=self.topk,
+                )
+                preds = cls_res.get("predictions", [])
+                best = preds[0] if preds else None
+                roi_results.append(
+                    {
+                        "box": (x1c, y1c, x2c, y2c),
+                        "predictions": preds,
+                        "best": best,
+                    }
+                )
+
+            self.progress.emit(100, "Классификация зон завершена")
+            self.finished.emit(
+                {
+                    "image": str(img_path),
+                    "roi_results": roi_results,
+                }
+            )
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class NewController:
     def __init__(self, view):
         self.view = view
@@ -301,7 +411,29 @@ class NewController:
         # Флаг и путь для последовательного пайплайна улучшение → ROI → YOLO
         self.pipeline_active = False
         self.pipeline_image_path = None
+        # Последние результаты анализа ROI (для SAR-HUB классификации)
+        self.last_roi_image_path: str | None = None
+        self.last_roi_regions: list = []
+        # Результаты SAR-HUB по зонам и текущий индекс
+        self.sarhub_roi_results: list = []
+        self.sarhub_roi_index: int = 0
+        # Параметры улучшения для SAR-HUB (используются в полном пайплайне)
+        self.sarhub_enhance_method: str | None = None
+        self.sarhub_enhance_intensity: int | None = None
         self.setup_connections()
+
+    # ---------- Вспомогательные безопасные методы для UI ----------
+
+    def _safe_set_enabled(self, widget, enabled: bool):
+        """Безопасно включает/выключает виджеты, игнорируя случаи,
+        когда C++‑объект уже удалён (RuntimeError: wrapped C/C++ object ...)."""
+        if widget is None:
+            return
+        try:
+            widget.setEnabled(enabled)
+        except RuntimeError:
+            # Виджет уже уничтожен Qt (например, окно закрыто) — просто игнорируем
+            pass
         
     def setup_connections(self):
         """Настройка соединений между интерфейсом и контроллером"""
@@ -312,6 +444,15 @@ class NewController:
         self.view.detect_btn.setToolTip("Детекция доступна во вкладке 'Зоны интересов'")
         self.view.send_coords_btn.clicked.connect(self.send_coordinates)
         self.view.save_results_btn.clicked.connect(self.save_detection_results)
+
+        # Классификация сцены SAR-HUB на главной вкладке
+        if hasattr(self.view, "sarhub_classify_btn"):
+            self.view.sarhub_classify_btn.clicked.connect(self.start_sarhub_classification)
+        # Навигация по зонам SAR-HUB
+        if hasattr(self.view, "sarhub_prev_btn"):
+            self.view.sarhub_prev_btn.clicked.connect(self.show_prev_sarhub_roi)
+        if hasattr(self.view, "sarhub_next_btn"):
+            self.view.sarhub_next_btn.clicked.connect(self.show_next_sarhub_roi)
         
         # Вкладка зон интересов
         self.view.roi_analyze_btn.clicked.connect(self.start_roi_analysis)
@@ -391,6 +532,249 @@ class NewController:
             return
         image_path = item.data(1)
         self._run_detection_for_image(image_path)
+
+    def start_sarhub_classification(self):
+        """Запуск классификации SAR-HUB по найденным зонам интересов (ROI)
+        
+        Используются результаты последнего анализа во вкладке 'Зоны интересов'.
+        """
+        if not self.last_roi_image_path or not self.last_roi_regions:
+            self.view.show_error(
+                "Сначала выполните анализ зон интересов во вкладке 'Зоны интересов',\n"
+                "затем запустите классификацию SAR-HUB."
+            )
+            return
+
+        image_path = self.last_roi_image_path
+
+        # Путь к весам SAR-HUB (по умолчанию ожидаем ResNet18_TSX.pth в корне проекта)
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        default_weights = os.path.join(root_dir, "ResNet18_TSX.pth")
+
+        weights_path = default_weights
+
+        # Путь к файлу с человекочитаемыми метками классов.
+        # Ожидается текстовый файл с 32 строками (по одной метке на класс).
+        labels_default = os.path.join(root_dir, "models", "tsx_labels.txt")
+        labels_path = labels_default if os.path.isfile(labels_default) else None
+
+        if not os.path.isfile(weights_path):
+            self.view.show_error(
+                f"Не найден файл весов SAR-HUB модели.\n"
+                f"Ожидаемый путь: {weights_path}\n"
+                f"Переместите ResNet18_TSX.pth в корневую папку проекта."
+            )
+            return
+
+        # Сбрасываем предыдущие результаты классификации
+        self.sarhub_roi_results = []
+        self.sarhub_roi_index = 0
+
+        self.set_ui_enabled(False)
+        self.view.sarhub_status_label.setText("Классификация зон SAR-HUB запущена...")
+
+        worker = SarHubClassificationWorker(
+            image_path=image_path,
+            regions=self.last_roi_regions,
+            weights_path=weights_path,
+            enhance_method=self.sarhub_enhance_method,
+            enhance_intensity=self.sarhub_enhance_intensity,
+            labels_path=labels_path,
+            topk=3,
+        )
+        worker.progress.connect(self.view.update_progress)
+        worker.finished.connect(self.on_sarhub_finished)
+        worker.error.connect(self.on_sarhub_error)
+
+        self.current_workers.append(worker)
+        worker.start()
+
+    def on_sarhub_finished(self, result: dict):
+        """Обработка завершения классификации SAR-HUB по зонам ROI
+        
+        Формируем отдельные изображения‑кропы для каждой зоны с подписью класса
+        и даём возможность листать их стрелками в окне 'Предсказание модели'.
+        """
+        self.set_ui_enabled(True)
+        self.view.progress_bar.setVisible(False)
+
+        image_path = result.get("image")
+        roi_results = result.get("roi_results", [])
+
+        if not image_path or not os.path.isfile(image_path) or not roi_results:
+            self.view.sarhub_status_label.setText("Классификация завершена (зон нет)")
+            # Сбрасываем отображение
+            self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
+            return
+
+        # Готовим директорию и исходное изображение для кропов
+        tmp_dir = os.path.join(os.path.dirname(__file__), "..", "..", "tmp")
+        tmp_dir = os.path.abspath(tmp_dir)
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            self.view.sarhub_status_label.setText("Классификация завершена (ошибка чтения изображения)")
+            self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
+            return
+
+        # Приводим изображение к BGR один раз (без рамок и дополнительных аннотаций)
+        base_vis = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        # Копия для полноразмерной визуализации с боксами и подписями классов
+        full_vis = base_vis.copy()
+
+        prepared = []
+        annotated_full_path = None
+        for idx, roi in enumerate(roi_results):
+            box = roi.get("box")
+            best = roi.get("best")
+            if not box:
+                continue
+            x1, y1, x2, y2 = map(int, box)
+            h, w = base_vis.shape[:2]
+            x1c, y1c = max(0, x1), max(0, y1)
+            x2c, y2c = min(w, x2), min(h, y2)
+            if x2c <= x1c or y2c <= y1c:
+                continue
+
+            # Визуальный crop берём напрямую из улучшенного изображения БЕЗ жёлтых рамок
+            crop = base_vis[y1c:y2c, x1c:x2c].copy()
+
+            # Подпись основного класса поверх блока (top‑1 для наглядности)
+            label = best.get("label") if best else "неизвестно"
+            prob = best.get("prob") if best and "prob" in best else None
+            if label is None:
+                label = "неизвестно"
+            text = label if prob is None else f"{label} ({prob:.2f})"
+
+            y_text = max(16, int(0.08 * (y2c - y1c)))
+            # Тень
+            cv2.putText(
+                crop,
+                text,
+                (5, y_text + 1),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            # Основной текст
+            cv2.putText(
+                crop,
+                text,
+                (5, y_text),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+            # Рисуем bbox и подпись для этой зоны на полноразмерном изображении
+            cv2.rectangle(full_vis, (x1c, y1c), (x2c, y2c), (0, 255, 255), 2)
+            full_y_text = max(16, y1c - 4)
+            cv2.putText(
+                full_vis,
+                text,
+                (x1c + 1, full_y_text + 1),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                full_vis,
+                text,
+                (x1c, full_y_text),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+            out_path = os.path.join(tmp_dir, f"sarhub_roi_{idx+1}.jpg")
+            cv2.imwrite(out_path, crop)
+
+            prepared.append(
+                {
+                    "box": (x1c, y1c, x2c, y2c),
+                    "best": best,
+                    "predictions": roi.get("predictions", []),
+                    "crop_path": out_path,
+                }
+            )
+
+        # Сохраняем полноразмерное изображение с выделенными классами
+        if len(roi_results) > 0:
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            annotated_full_path = os.path.join(tmp_dir, f"{base_name}_sarhub_full.jpg")
+            cv2.imwrite(annotated_full_path, full_vis)
+
+        self.sarhub_roi_results = prepared
+        self.sarhub_roi_index = 0
+
+        total_rois = len(self.sarhub_roi_results)
+        if total_rois == 0:
+            self.view.sarhub_status_label.setText("Классификация завершена (кропы не сформированы)")
+            self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
+        else:
+            # Обновляем окно "Найденные объекты":
+            # колонка 0 — "Зона N", далее фиксированные 3 столбца для top‑3 классов.
+            table = self.view.results_table
+            
+            max_preds = 3  # всегда показываем top‑3
+            col_count = 1 + max_preds  # Зона + 3 класса
+            table.setColumnCount(col_count)
+
+            # Заголовки: "Зона", "Класс 1", "Класс 2", ...
+            headers = ["Зона"] + [f"Класс {i+1}" for i in range(max_preds)]
+            table.setHorizontalHeaderLabels(headers)
+
+            table.setRowCount(total_rois)
+            for i, roi in enumerate(self.sarhub_roi_results):
+                table.setItem(i, 0, QTableWidgetItem(f"Зона {i+1}"))
+
+                preds = roi.get("predictions", [])
+                for j in range(max_preds):
+                    if j < len(preds):
+                        p = preds[j]
+                        lbl = p.get("label", "неизвестно")
+                        pr = p.get("prob")
+                        if pr is not None:
+                            cell_text = f"{lbl} ({pr:.2f})"
+                        else:
+                            cell_text = f"{lbl} (0.00)"
+                    else:
+                        # Если предсказаний меньше трёх — заполняем "нулями"
+                        cell_text = "0.00"
+                    table.setItem(i, 1 + j, QTableWidgetItem(cell_text))
+
+            # Показать первую зону в окне предсказания
+            self._show_current_sarhub_roi()
+            self.view.sarhub_status_label.setText("Классификация зон SAR-HUB завершена")
+
+            # Показать полноразмерное изображение с выделенными классами
+            if annotated_full_path is not None:
+                try:
+                    self.view.original_view.set_image(annotated_full_path)
+                except RuntimeError:
+                    # Окно могло быть уже закрыто, просто игнорируем
+                    pass
+
+        # Если это был шаг полного пайплайна — завершаем его
+        if self.pipeline_active:
+            self.pipeline_active = False
+            self.pipeline_image_path = None
+
+    def on_sarhub_error(self, error_message: str):
+        """Обработка ошибок SAR-HUB классификации"""
+        self.set_ui_enabled(True)
+        self.view.progress_bar.setVisible(False)
+        self.view.sarhub_status_label.setText("Ошибка классификации")
+        self.view.show_error(f"Ошибка SAR-HUB классификации: {error_message}")
         
     def on_detection_finished(self, results):
         """Обработка завершения детекции"""
@@ -424,6 +808,9 @@ class NewController:
         """Внутренний запуск анализа зон интересов для указанного изображения"""
         roi_type = self.view.roi_type_combo.currentText()
         sensitivity = self.view.roi_sensitivity_slider.value()
+        
+        # Запоминаем путь изображения для последующей SAR-HUB классификации по ROI
+        self.last_roi_image_path = image_path
         
         self.set_ui_enabled(False)
         
@@ -460,6 +847,8 @@ class NewController:
         
         # Показываем детекцию во вкладке ROI
         self.view.roi_results_list.clear()
+        # Сохраняем регионы для последующей SAR-HUB классификации
+        self.last_roi_regions = results.get("regions", [])
         if 'image_with_boxes' in results:
             cnt = int(results.get('count', 0))
             self.view.roi_results_list.addItem(f"Найдено областей: {cnt}")
@@ -472,9 +861,14 @@ class NewController:
             # Fallback старого формата
             self.view.roi_analysis_view.set_image(results['roi_image'])
         
-        # Если активен полнофункциональный пайплайн, запускаем следующий этап — детекцию (YOLO)
+        # Если активен полнофункциональный пайплайн,
+        # после ROI сразу запускаем классификацию SAR-HUB по найденным областям.
         if self.pipeline_active and self.pipeline_image_path:
-            self._run_detection_for_image(self.pipeline_image_path)
+            # Убедимся, что путь и регионы заданы
+            self.last_roi_image_path = self.pipeline_image_path
+            self.last_roi_regions = results.get("regions", [])
+            if self.last_roi_image_path and self.last_roi_regions:
+                self.start_sarhub_classification()
             
     def on_roi_error(self, error_message):
         """Обработка ошибки анализа ROI"""
@@ -513,8 +907,9 @@ class NewController:
         """
         Полный SAR‑пайплайн:
         1) Улучшение изображения выбранным алгоритмом;
-        2) Анализ зон интересов (ROI);
-        3) Детекция / классификация (YOLO) по улучшенному изображению.
+        2) Анализ зон интересов (ROI) по улучшенному снимку;
+        3) Классификация каждой найденной зоны с помощью SAR-HUB ResNet-18 TSX
+           и просмотр результатов во вкладке «Предсказание модели» (стрелки ← / →).
         """
         if self.view.file_list.count() == 0:
             self.view.show_error("Выберите изображения для анализа")
@@ -576,6 +971,9 @@ class NewController:
             # Включаем режим последовательного пайплайна и запоминаем путь
             self.pipeline_active = True
             self.pipeline_image_path = enhanced_path
+            # Запоминаем настройки улучшения для SAR-HUB по ROI
+            self.sarhub_enhance_method = method
+            self.sarhub_enhance_intensity = intensity
             
             # Шаг 2: ROI‑анализ по улучшенному изображению (асинхронно)
             self._run_roi_analysis_for_image(enhanced_path)
@@ -662,10 +1060,66 @@ class NewController:
         self.view.enhance_save_btn.setEnabled(enabled)
         if hasattr(self.view, "enhance_pipeline_btn"):
             self.view.enhance_pipeline_btn.setEnabled(enabled)
+        # Классификация SAR-HUB
+        if hasattr(self.view, "sarhub_classify_btn"):
+            self.view.sarhub_classify_btn.setEnabled(enabled)
+        if hasattr(self.view, "sarhub_prev_btn"):
+            self.view.sarhub_prev_btn.setEnabled(enabled)
+        if hasattr(self.view, "sarhub_next_btn"):
+            self.view.sarhub_next_btn.setEnabled(enabled)
         
         if not enabled:
             self.view.progress_bar.setVisible(True)
         else:
             self.view.progress_bar.setVisible(False)
+
+    # ---------- Навигация по результатам SAR-HUB ----------
+
+    def _show_current_sarhub_roi(self):
+        """Показывает текущий ROI‑кроп и обновляет подписи"""
+        total = len(self.sarhub_roi_results)
+        if total == 0:
+            self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
+            return
+
+        idx = max(0, min(self.sarhub_roi_index, total - 1))
+        self.sarhub_roi_index = idx
+        roi = self.sarhub_roi_results[idx]
+
+        crop_path = roi.get("crop_path")
+        if crop_path and os.path.isfile(crop_path):
+            self.view.prediction_view.set_image(crop_path)
+
+        self.view.sarhub_roi_info_label.setText(f"Зона {idx+1} / {total}")
+
+        # Формируем текст: топ-N объектов для текущего блока
+        preds = roi.get("predictions", [])
+        if preds:
+            parts = []
+            for p in preds:
+                lbl = p.get("label", "неизвестно")
+                pr = p.get("prob")
+                if pr is not None:
+                    parts.append(f"{lbl} ({pr:.2f})")
+                else:
+                    parts.append(lbl)
+            summary = "; ".join(parts)
+            self.view.sarhub_status_label.setText(f"Зона {idx+1}/{total}: {summary}")
+        else:
+            self.view.sarhub_status_label.setText(f"Зона {idx+1}/{total}: результаты отсутствуют")
+
+    def show_next_sarhub_roi(self):
+        """Показать следующую зону SAR-HUB"""
+        if not self.sarhub_roi_results:
+            return
+        self.sarhub_roi_index = (self.sarhub_roi_index + 1) % len(self.sarhub_roi_results)
+        self._show_current_sarhub_roi()
+
+    def show_prev_sarhub_roi(self):
+        """Показать предыдущую зону SAR-HUB"""
+        if not self.sarhub_roi_results:
+            return
+        self.sarhub_roi_index = (self.sarhub_roi_index - 1) % len(self.sarhub_roi_results)
+        self._show_current_sarhub_roi()
 
 
