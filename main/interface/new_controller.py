@@ -442,7 +442,6 @@ class NewController:
         self.view.browse_btn.clicked.connect(self.browse_files_main)
         self.view.detect_btn.setEnabled(False)
         self.view.detect_btn.setToolTip("Детекция доступна во вкладке 'Зоны интересов'")
-        self.view.send_coords_btn.clicked.connect(self.send_coordinates)
         self.view.save_results_btn.clicked.connect(self.save_detection_results)
 
         # Классификация сцены SAR-HUB на главной вкладке
@@ -453,6 +452,9 @@ class NewController:
             self.view.sarhub_prev_btn.clicked.connect(self.show_prev_sarhub_roi)
         if hasattr(self.view, "sarhub_next_btn"):
             self.view.sarhub_next_btn.clicked.connect(self.show_next_sarhub_roi)
+        # Улучшение текущего фрагмента (ROI) в окне "Предсказание модели"
+        if hasattr(self.view, "roi_frame_enhance_btn"):
+            self.view.roi_frame_enhance_btn.clicked.connect(self.enhance_current_roi_frame_visual)
         
         # Вкладка зон интересов
         self.view.roi_analyze_btn.clicked.connect(self.start_roi_analysis)
@@ -490,18 +492,6 @@ class NewController:
                 item.setData(1, file)  # Сохраняем полный путь
                 self.view.file_list.addItem(item)
                 
-    def send_coordinates(self):
-        """Отправка координат (имитация)"""
-        lat = self.view.lat_input.text()
-        lon = self.view.lon_input.text()
-        scale = self.view.scale_input.value()
-        
-        QMessageBox.information(
-            self.view,
-            "Координаты отправлены",
-            f"Широта: {lat}, Долгота: {lon}, Масштаб: {scale}"
-        )
-        
     def _run_detection_for_image(self, image_path: str):
         """Внутренний запуск детекции объектов для указанного изображения"""
         confidence = self.view.confidence_slider.value() / 100.0
@@ -743,10 +733,11 @@ class NewController:
                         p = preds[j]
                         lbl = p.get("label", "неизвестно")
                         pr = p.get("prob")
-                        if pr is not None:
+                        if pr is not None and pr > 0.001:  # Если вероятность > 0.001, показываем класс
                             cell_text = f"{lbl} ({pr:.2f})"
                         else:
-                            cell_text = f"{lbl} (0.00)"
+                            # Если вероятность нулевая или очень мала — просто "0.00" без названия класса
+                            cell_text = "0.00"
                     else:
                         # Если предсказаний меньше трёх — заполняем "нулями"
                         cell_text = "0.00"
@@ -1038,14 +1029,75 @@ class NewController:
         if file_path:
             QMessageBox.information(self.view, "Сохранение", f"Результаты сохранены: {file_path}")
             
+    def enhance_current_roi_frame_visual(self):
+        """
+        Улучшение качества текущего маленького фрагмента (ROI), который показан
+        в окне 'Предсказание модели' на главной вкладке.
+        Влияет только на визуализацию, не на классификацию SAR-HUB.
+        """
+        if not self.sarhub_roi_results:
+            self.view.show_error("Нет фрагментов для улучшения. Сначала выполните полный SAR‑пайплайн.")
+            return
+
+        idx = max(0, min(self.sarhub_roi_index, len(self.sarhub_roi_results) - 1))
+        roi = self.sarhub_roi_results[idx]
+        crop_path = roi.get("crop_path")
+        if not crop_path or not os.path.isfile(crop_path):
+            self.view.show_error("Не удалось найти изображение текущего фрагмента.")
+            return
+
+        img = cv2.imread(crop_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            self.view.show_error("Ошибка загрузки изображения фрагмента.")
+            return
+
+        # Настройки метода/интенсивности из нового блока на главной вкладке
+        method_text = getattr(self.view, "roi_frame_method_combo", None)
+        if method_text is not None:
+            method_text = self.view.roi_frame_method_combo.currentText()
+        else:
+            method_text = "Гибридное подавление шума SAR"
+
+        intensity_slider = getattr(self.view, "roi_frame_intensity_slider", None)
+        intensity = intensity_slider.value() if intensity_slider is not None else 50
+
+        method_map = {
+            'Гибридное подавление шума SAR': 'hybrid_sar_denoise',
+            'Адаптивное подавление спекла SAR': 'sar_adaptive',
+            'Анизотропная диффузия SAR': 'sar_srad',
+        }
+        method = method_map.get(method_text, 'hybrid_sar_denoise')
+
+        try:
+            from main.algorythms.improvment.image_enhancement import ImageEnhancement
+            enhancer = ImageEnhancement()
+            enhanced_np = enhancer.enhance_array(img, method=method, intensity=intensity)
+
+            tmp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tmp')
+            tmp_dir = os.path.abspath(tmp_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
+            base_name = os.path.splitext(os.path.basename(crop_path))[0]
+            out_path = os.path.join(tmp_dir, f"{base_name}_vis_enhanced.jpg")
+            cv2.imwrite(out_path, enhanced_np)
+
+            # Показываем улучшенный фрагмент в окне предсказания
+            self.view.prediction_view.set_image(out_path)
+        except Exception as e:
+            self.view.show_error(f"Не удалось улучшить фрагмент: {e}")
+
     def set_ui_enabled(self, enabled):
         """Включение/отключение элементов интерфейса"""
         # Главная вкладка
         self.view.detect_btn.setEnabled(enabled)
         self.view.browse_btn.setEnabled(enabled)
-        self.view.send_coords_btn.setEnabled(enabled)
         self.view.save_results_btn.setEnabled(enabled)
         self.view.confidence_slider.setEnabled(enabled)
+        if hasattr(self.view, "roi_frame_method_combo"):
+            self.view.roi_frame_method_combo.setEnabled(enabled)
+        if hasattr(self.view, "roi_frame_intensity_slider"):
+            self.view.roi_frame_intensity_slider.setEnabled(enabled)
+        if hasattr(self.view, "roi_frame_enhance_btn"):
+            self.view.roi_frame_enhance_btn.setEnabled(enabled)
         
         # Вкладка ROI
         self.view.roi_analyze_btn.setEnabled(enabled)

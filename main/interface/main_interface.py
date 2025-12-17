@@ -184,39 +184,47 @@ class MainInterface(QMainWindow):
         
         layout = QVBoxLayout(panel)
         
-        # Группа координат
-        coords_group = QGroupBox("Координаты")
-        coords_layout = QGridLayout(coords_group)
+        # Группа параметров фрагментов и классификации
+        fragments_group = QGroupBox("Фрагменты и параметры классификации")
+        fragments_layout = QGridLayout(fragments_group)
         
-        coords_layout.addWidget(QLabel("Широта:"), 0, 0)
-        self.lat_input = QLineEdit("55.82103")
-        coords_layout.addWidget(self.lat_input, 0, 1)
-        
-        coords_layout.addWidget(QLabel("Долгота:"), 1, 0)
-        self.lon_input = QLineEdit("49.16219")
-        coords_layout.addWidget(self.lon_input, 1, 1)
-        
-        coords_layout.addWidget(QLabel("Масштаб:"), 2, 0)
-        self.scale_input = QSpinBox()
-        self.scale_input.setRange(1, 20)
-        self.scale_input.setValue(16)
-        coords_layout.addWidget(self.scale_input, 2, 1)
-        
-        coords_layout.addWidget(QLabel("Уверенность классификатора:"), 3, 0)
+        # Уверенность классификатора (как раньше)
+        fragments_layout.addWidget(QLabel("Уверенность классификатора:"), 0, 0)
         self.confidence_label = QLabel("0.35")
-        coords_layout.addWidget(self.confidence_label, 3, 1)
+        fragments_layout.addWidget(self.confidence_label, 0, 1)
         
         self.confidence_slider = QSlider(Qt.Horizontal)
         self.confidence_slider.setRange(1, 100)
         self.confidence_slider.setValue(35)
         self.confidence_slider.valueChanged.connect(self.update_confidence_label)
-        coords_layout.addWidget(self.confidence_slider, 4, 0, 1, 2)
+        fragments_layout.addWidget(self.confidence_slider, 1, 0, 1, 2)
         
-        self.send_coords_btn = QPushButton("Отправить координаты")
-        coords_layout.addWidget(self.send_coords_btn, 5, 0, 1, 2)
+        # Управление улучшением отдельных ROI‑фрагментов (окон "Предсказание модели")
+        row = 2
+        fragments_layout.addWidget(QLabel("Улучшение фрагментов (ROI):"), row, 0, 1, 2)
+        row += 1
         
-        # Блок координат снова добавляем в основной интерфейс
-        layout.addWidget(coords_group)
+        fragments_layout.addWidget(QLabel("Метод:"), row, 0)
+        self.roi_frame_method_combo = QComboBox()
+        self.roi_frame_method_combo.addItems([
+            "Гибридное подавление шума SAR",
+            "Адаптивное подавление спекла SAR",
+            "Анизотропная диффузия SAR",
+        ])
+        fragments_layout.addWidget(self.roi_frame_method_combo, row, 1)
+        row += 1
+        
+        fragments_layout.addWidget(QLabel("Интенсивность:"), row, 0)
+        self.roi_frame_intensity_slider = QSlider(Qt.Horizontal)
+        self.roi_frame_intensity_slider.setRange(1, 100)
+        self.roi_frame_intensity_slider.setValue(50)
+        fragments_layout.addWidget(self.roi_frame_intensity_slider, row, 1)
+        row += 1
+        
+        self.roi_frame_enhance_btn = QPushButton("Улучшить текущий фрагмент")
+        fragments_layout.addWidget(self.roi_frame_enhance_btn, row, 0, 1, 2)
+        
+        layout.addWidget(fragments_group)
         
         # Группа загрузки файлов
         upload_group = QGroupBox("Загрузка файлов")
