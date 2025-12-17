@@ -537,9 +537,9 @@ class NewController:
 
         image_path = self.last_roi_image_path
 
-        # Путь к весам SAR-HUB (по умолчанию ожидаем ResNet18_TSX.pth в корне проекта)
+        # Путь к весам SAR-HUB (ожидаем ResNet18_TSX.pth в папке models)
         root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        default_weights = os.path.join(root_dir, "ResNet18_TSX.pth")
+        default_weights = os.path.join(root_dir, "models", "ResNet18_TSX.pth")
 
         weights_path = default_weights
 
@@ -552,7 +552,7 @@ class NewController:
             self.view.show_error(
                 f"Не найден файл весов SAR-HUB модели.\n"
                 f"Ожидаемый путь: {weights_path}\n"
-                f"Переместите ResNet18_TSX.pth в корневую папку проекта."
+                f"Переместите ResNet18_TSX.pth в папку models проекта."
             )
             return
 
@@ -742,6 +742,16 @@ class NewController:
                         # Если предсказаний меньше трёх — заполняем "нулями"
                         cell_text = "0.00"
                     table.setItem(i, 1 + j, QTableWidgetItem(cell_text))
+            
+            # Настройка ширины столбцов: автоматическое подстраивание под содержимое
+            from PyQt5.QtWidgets import QHeaderView
+            for col in range(col_count):
+                table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+                # Минимальная ширина для каждого столбца
+                if col == 0:
+                    table.setColumnWidth(col, max(80, table.columnWidth(col)))
+                else:
+                    table.setColumnWidth(col, max(120, table.columnWidth(col)))
 
             # Показать первую зону в окне предсказания
             self._show_current_sarhub_roi()

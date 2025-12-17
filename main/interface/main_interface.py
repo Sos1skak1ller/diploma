@@ -5,7 +5,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
                              QPushButton, QSlider, QSpinBox, QLineEdit, 
                              QTextEdit, QFileDialog, QMessageBox, QProgressBar,
                              QFrame, QScrollArea, QGroupBox, QGridLayout,
-                             QComboBox, QCheckBox, QListWidget, QListWidgetItem)
+                             QComboBox, QCheckBox, QListWidget, QListWidgetItem,
+                             QTableWidget, QHeaderView)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRectF, QPointF
 from PyQt5.QtGui import QPixmap, QWheelEvent, QMouseEvent, QFont, QPalette, QColor
 from .view import MyGraphicsView, TableWidget
@@ -290,8 +291,13 @@ class MainInterface(QMainWindow):
         
         layout = QVBoxLayout(panel)
         
-        # Изображения
-        images_layout = QHBoxLayout()
+        # Используем QSplitter для возможности изменения размеров областей
+        main_splitter = QSplitter(Qt.Vertical)
+        
+        # Верхняя часть - изображения
+        images_widget = QWidget()
+        images_layout = QHBoxLayout(images_widget)
+        images_layout.setContentsMargins(0, 0, 0, 0)
         
         # Оригинальное изображение
         original_group = QGroupBox("Оригинальное изображение")
@@ -322,18 +328,32 @@ class MainInterface(QMainWindow):
 
         images_layout.addWidget(prediction_group)
         
-        layout.addLayout(images_layout)
+        main_splitter.addWidget(images_widget)
         
-        # Результаты детекции
+        # Нижняя часть - результаты детекции (таблица)
         results_group = QGroupBox("Найденные объекты")
         results_layout = QVBoxLayout(results_group)
         
         self.results_table = TableWidget()
         self.results_table.setColumnCount(2)
         self.results_table.setHorizontalHeaderLabels(["Объект", "Количество"])
+        # Настройка ширины столбцов: автоматическое подстраивание под содержимое
+        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        # Минимальная ширина столбцов
+        self.results_table.setColumnWidth(0, 100)
+        self.results_table.setColumnWidth(1, 150)
         results_layout.addWidget(self.results_table)
         
-        layout.addWidget(results_group)
+        main_splitter.addWidget(results_group)
+        
+        # Настройка пропорций: изображения получают больше места (3:1)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 1)
+        # Минимальная высота таблицы
+        results_group.setMinimumHeight(100)
+        
+        layout.addWidget(main_splitter)
         
         return panel
         
