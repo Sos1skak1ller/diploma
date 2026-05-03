@@ -1,5 +1,7 @@
 import os
 import sys
+from typing import Optional
+
 from PyQt5.QtWidgets import QFileDialog, QMessageBox, QListWidgetItem, QTableWidgetItem
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QPixmap
@@ -316,9 +318,9 @@ class SarHubClassificationWorker(QThread):
         image_path: str,
         regions: list,
         weights_path: str,
-        enhance_method: str | None = None,
-        enhance_intensity: int | None = None,
-        labels_path: str | None = None,
+        enhance_method: Optional[str] = None,
+        enhance_intensity: Optional[int] = None,
+        labels_path: Optional[str] = None,
         topk: int = 3,
     ):
         super().__init__()
@@ -412,14 +414,14 @@ class NewController:
         self.pipeline_active = False
         self.pipeline_image_path = None
         # Последние результаты анализа ROI (для SAR-HUB классификации)
-        self.last_roi_image_path: str | None = None
+        self.last_roi_image_path: Optional[str] = None
         self.last_roi_regions: list = []
         # Результаты SAR-HUB по зонам и текущий индекс
         self.sarhub_roi_results: list = []
         self.sarhub_roi_index: int = 0
         # Параметры улучшения для SAR-HUB (используются в полном пайплайне)
-        self.sarhub_enhance_method: str | None = None
-        self.sarhub_enhance_intensity: int | None = None
+        self.sarhub_enhance_method: Optional[str] = None
+        self.sarhub_enhance_intensity: Optional[int] = None
         self.setup_connections()
 
     # ---------- Вспомогательные безопасные методы для UI ----------
