@@ -307,8 +307,13 @@ class EnhancementWorker(QThread):
             self.error.emit(str(e))
 
 
-class SarHubClassificationWorker(QThread):
-    """Поток для классификации зон интересов с помощью SAR-HUB ResNet-18 TSX"""
+class YoloRoiInferenceWorker(QThread):
+    """Инференс YOLOv11m по каждому ROI-кропу.
+
+    На вход подаются кропы по bbox из анализа зон (кластеризация / GATE). Отдельный шаг
+    улучшения качества на кропе перед инференсом не выполняется — только пиксели выреза
+    области с того же снимка ``image_path``, на котором считался ROI.
+    """
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -318,54 +323,47 @@ class SarHubClassificationWorker(QThread):
         image_path: str,
         regions: list,
         weights_path: str,
-        enhance_method: Optional[str] = None,
-        enhance_intensity: Optional[int] = None,
-        labels_path: Optional[str] = None,
-        topk: int = 3,
+        max_predictions: int = 3,
+        confidence: float = 0.25,
+        image_size: int = 1024,
     ):
         super().__init__()
         self.image_path = image_path
         self.regions = regions  # список словарей с ключами x1,y1,x2,y2,...
         self.weights_path = weights_path
-        self.enhance_method = enhance_method
-        self.enhance_intensity = enhance_intensity
-        self.labels_path = labels_path
-        self.topk = topk
+        self.max_predictions = max_predictions
+        self.confidence = confidence
+        self.image_size = image_size
 
     def run(self):
         try:
             from pathlib import Path
             from PIL import Image
-            from main.algorythms.area_selection.sar_hub_resnet18_inference import classify_pil_image
-            from main.algorythms.improvment.image_enhancement import ImageEnhancement
+            from main.algorythms.area_selection.yolov11_inference import (
+                detect_pil_image,
+                select_torch_device,
+            )
 
-            self.progress.emit(15, "Загрузка модели SAR-HUB...")
+            self.progress.emit(15, "Загрузка YOLOv11m...")
 
             weights_p = Path(self.weights_path)
             if not weights_p.is_file():
-                raise FileNotFoundError(f"Файл весов SAR-HUB не найден: {weights_p}")
-
-            labels_p = Path(self.labels_path) if self.labels_path else None
+                raise FileNotFoundError(f"Файл весов YOLOv11m не найден: {weights_p}")
 
             img_path = Path(self.image_path)
             if not img_path.is_file():
-                raise FileNotFoundError(f"Изображение для SAR-HUB не найдено: {img_path}")
+                raise FileNotFoundError(f"Изображение для YOLOv11m не найдено: {img_path}")
 
             full_img = Image.open(img_path)
-            enhancer = ImageEnhancement()
-            # Метод и интенсивность для маленьких блоков: либо явные, либо мягкий дефолт
-            roi_method = self.enhance_method or "hybrid_sar_denoise"
-            roi_intensity = int(self.enhance_intensity if self.enhance_intensity is not None else 50)
+            device = select_torch_device()
 
             roi_results = []
             total = max(1, len(self.regions))
             for i, r in enumerate(self.regions):
-                # Прогресс по зонам
-                frac = (i / total)
-                self.progress.emit(20 + int(70 * frac), f"Классификация зоны {i+1}/{len(self.regions)}...")
+                frac = i / total
+                self.progress.emit(20 + int(70 * frac), f"YOLO-инференс зоны {i+1}/{len(self.regions)}...")
 
                 x1, y1, x2, y2 = int(r["x1"]), int(r["y1"]), int(r["x2"]), int(r["y2"])
-                # Защита от выхода за границы
                 w, h = full_img.size
                 x1c, y1c = max(0, x1), max(0, y1)
                 x2c, y2c = min(w, x2), min(h, y2)
@@ -374,18 +372,16 @@ class SarHubClassificationWorker(QThread):
 
                 crop = full_img.crop((x1c, y1c, x2c, y2c))
 
-                # Дополнительное улучшение качества для маленького блока
-                crop_np = np.array(crop)
-                crop_np = enhancer.enhance_array(crop_np, method=roi_method, intensity=roi_intensity)
-                crop = Image.fromarray(crop_np)
-                cls_res = classify_pil_image(
+                detect_res = detect_pil_image(
                     img=crop,
                     weights_path=weights_p,
-                    labels_path=labels_p,
-                    topk=self.topk,
+                    conf=self.confidence,
+                    imgsz=self.image_size,
+                    max_predictions=self.max_predictions,
+                    device=device,
                 )
-                preds = cls_res.get("predictions", [])
-                best = preds[0] if preds else None
+                preds = detect_res.get("predictions", [])
+                best = detect_res.get("best")
                 roi_results.append(
                     {
                         "box": (x1c, y1c, x2c, y2c),
@@ -394,10 +390,12 @@ class SarHubClassificationWorker(QThread):
                     }
                 )
 
-            self.progress.emit(100, "Классификация зон завершена")
+            self.progress.emit(100, "YOLO-инференс зон завершён")
             self.finished.emit(
                 {
                     "image": str(img_path),
+                    "weights": str(weights_p),
+                    "device": device,
                     "roi_results": roi_results,
                 }
             )
@@ -481,16 +479,12 @@ class NewController:
         # Флаг и путь для последовательного пайплайна улучшение → ROI → YOLO
         self.pipeline_active = False
         self.pipeline_image_path = None
-        # Последние результаты анализа ROI (для SAR-HUB классификации)
+        # Последние результаты анализа ROI (для YOLOv11m-инференса)
         self.last_roi_image_path: Optional[str] = None
         self.last_roi_regions: list = []
-        # Результаты SAR-HUB по зонам и текущий индекс
+        # Результаты YOLOv11m по зонам и текущий индекс
         self.sarhub_roi_results: list = []
         self.sarhub_roi_index: int = 0
-        # Параметры улучшения для SAR-HUB (используются в полном пайплайне)
-        self.sarhub_enhance_method: Optional[str] = None
-        self.sarhub_enhance_intensity: Optional[int] = None
-
         # Источник изображений: "local" | "remote"
         self.image_source: str = "local"
         # Метаданные удалённых снимков: { id -> dict }
@@ -536,10 +530,10 @@ class NewController:
         if hasattr(self.view, "refresh_remote_btn"):
             self.view.refresh_remote_btn.clicked.connect(self.refresh_remote_images)
 
-        # Классификация сцены SAR-HUB на главной вкладке
+        # YOLOv11m-инференс по ROI на главной вкладке
         if hasattr(self.view, "sarhub_classify_btn"):
             self.view.sarhub_classify_btn.clicked.connect(self.start_sarhub_classification)
-        # Навигация по зонам SAR-HUB
+        # Навигация по зонам YOLOv11m
         if hasattr(self.view, "sarhub_prev_btn"):
             self.view.sarhub_prev_btn.clicked.connect(self.show_prev_sarhub_roi)
         if hasattr(self.view, "sarhub_next_btn"):
@@ -816,35 +810,30 @@ class NewController:
         self._run_detection_for_image(image_path)
 
     def start_sarhub_classification(self):
-        """Запуск классификации SAR-HUB по найденным зонам интересов (ROI)
+        """Запуск YOLOv11m по найденным зонам интересов (ROI)
         
         Используются результаты последнего анализа во вкладке 'Зоны интересов'.
         """
         if not self.last_roi_image_path or not self.last_roi_regions:
             self.view.show_error(
                 "Сначала выполните анализ зон интересов во вкладке 'Зоны интересов',\n"
-                "затем запустите классификацию SAR-HUB."
+                "затем запустите YOLOv11m-инференс."
             )
             return
 
         image_path = self.last_roi_image_path
 
-        # Путь к весам SAR-HUB (ожидаем ResNet18_TSX.pth в папке models)
+        # Путь к весам YOLOv11m: Веса/YOLOv11m/best.pt
         root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        default_weights = os.path.join(root_dir, "models", "ResNet18_TSX.pth")
+        default_weights = os.path.join(root_dir, "Веса", "YOLOv11m", "best.pt")
 
         weights_path = default_weights
 
-        # Путь к файлу с человекочитаемыми метками классов.
-        # Ожидается текстовый файл с 32 строками (по одной метке на класс).
-        labels_default = os.path.join(root_dir, "models", "tsx_labels.txt")
-        labels_path = labels_default if os.path.isfile(labels_default) else None
-
         if not os.path.isfile(weights_path):
             self.view.show_error(
-                f"Не найден файл весов SAR-HUB модели.\n"
+                f"Не найден файл весов YOLOv11m.\n"
                 f"Ожидаемый путь: {weights_path}\n"
-                f"Переместите ResNet18_TSX.pth в папку models проекта."
+                f"Проверьте, что файл best.pt лежит в папке Веса/YOLOv11m."
             )
             return
 
@@ -853,16 +842,15 @@ class NewController:
         self.sarhub_roi_index = 0
 
         self.set_ui_enabled(False)
-        self.view.sarhub_status_label.setText("Классификация зон SAR-HUB запущена...")
+        self.view.sarhub_status_label.setText("YOLOv11m-инференс зон запущен...")
 
-        worker = SarHubClassificationWorker(
+        worker = YoloRoiInferenceWorker(
             image_path=image_path,
             regions=self.last_roi_regions,
             weights_path=weights_path,
-            enhance_method=self.sarhub_enhance_method,
-            enhance_intensity=self.sarhub_enhance_intensity,
-            labels_path=labels_path,
-            topk=3,
+            max_predictions=3,
+            confidence=0.25,
+            image_size=1024,
         )
         worker.progress.connect(self.view.update_progress)
         worker.finished.connect(self.on_sarhub_finished)
@@ -872,7 +860,7 @@ class NewController:
         worker.start()
 
     def on_sarhub_finished(self, result: dict):
-        """Обработка завершения классификации SAR-HUB по зонам ROI
+        """Обработка завершения YOLOv11m по зонам ROI
         
         Формируем отдельные изображения‑кропы для каждой зоны с подписью класса
         и даём возможность листать их стрелками в окне 'Предсказание модели'.
@@ -884,7 +872,7 @@ class NewController:
         roi_results = result.get("roi_results", [])
 
         if not image_path or not os.path.isfile(image_path) or not roi_results:
-            self.view.sarhub_status_label.setText("Классификация завершена (зон нет)")
+            self.view.sarhub_status_label.setText("YOLOv11m завершён (зон нет)")
             # Сбрасываем отображение
             self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
             return
@@ -896,7 +884,7 @@ class NewController:
 
         img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if img is None:
-            self.view.sarhub_status_label.setText("Классификация завершена (ошибка чтения изображения)")
+            self.view.sarhub_status_label.setText("YOLOv11m завершён (ошибка чтения изображения)")
             self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
             return
 
@@ -919,7 +907,7 @@ class NewController:
             if x2c <= x1c or y2c <= y1c:
                 continue
 
-            # Визуальный crop берём напрямую из улучшенного изображения БЕЗ жёлтых рамок
+            # Кроп тех же координат, что после кластеризации/ROI на ``image_path``, без фильтров
             crop = base_vis[y1c:y2c, x1c:x2c].copy()
 
             # Подпись основного класса поверх блока (top‑1 для наглядности)
@@ -928,6 +916,21 @@ class NewController:
             if label is None:
                 label = "неизвестно"
             text = label if prob is None else f"{label} ({prob:.2f})"
+            inner_bbox = best.get("bbox") if best else None
+            if inner_bbox:
+                bx1, by1, bx2, by2 = map(int, inner_bbox)
+                ch, cw = crop.shape[:2]
+                bx1, by1 = max(0, bx1), max(0, by1)
+                bx2, by2 = min(cw, bx2), min(ch, by2)
+                if bx2 > bx1 and by2 > by1:
+                    cv2.rectangle(crop, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
+                    cv2.rectangle(
+                        full_vis,
+                        (x1c + bx1, y1c + by1),
+                        (x1c + bx2, y1c + by2),
+                        (0, 255, 0),
+                        2,
+                    )
 
             y_text = max(16, int(0.08 * (y2c - y1c)))
             # Тень
@@ -1000,11 +1003,10 @@ class NewController:
 
         total_rois = len(self.sarhub_roi_results)
         if total_rois == 0:
-            self.view.sarhub_status_label.setText("Классификация завершена (кропы не сформированы)")
+            self.view.sarhub_status_label.setText("YOLOv11m завершён (кропы не сформированы)")
             self.view.sarhub_roi_info_label.setText("Зона 0 / 0")
         else:
-            # Обновляем окно "Найденные объекты":
-            # колонка 0 — "Зона N", далее фиксированные 3 столбца для top‑3 классов.
+            # Обновляем окно "Найденные объекты": зона + до трёх лучших YOLO-детекций.
             table = self.view.results_table
             
             max_preds = 3  # всегда показываем top‑3
@@ -1012,7 +1014,7 @@ class NewController:
             table.setColumnCount(col_count)
 
             # Заголовки: "Зона", "Класс 1", "Класс 2", ...
-            headers = ["Зона"] + [f"Класс {i+1}" for i in range(max_preds)]
+            headers = ["Зона"] + [f"Объект {i+1}" for i in range(max_preds)]
             table.setHorizontalHeaderLabels(headers)
 
             table.setRowCount(total_rois)
@@ -1028,7 +1030,6 @@ class NewController:
                         if pr is not None and pr > 0.001:  # Если вероятность > 0.001, показываем класс
                             cell_text = f"{lbl} ({pr:.2f})"
                         else:
-                            # Если вероятность нулевая или очень мала — просто "0.00" без названия класса
                             cell_text = "0.00"
                     else:
                         # Если предсказаний меньше трёх — заполняем "нулями"
@@ -1047,7 +1048,8 @@ class NewController:
 
             # Показать первую зону в окне предсказания
             self._show_current_sarhub_roi()
-            self.view.sarhub_status_label.setText("Классификация зон SAR-HUB завершена")
+            device = result.get("device", "cpu")
+            self.view.sarhub_status_label.setText(f"YOLOv11m-инференс зон завершён (device: {device})")
 
             # Показать полноразмерное изображение с выделенными классами
             if annotated_full_path is not None:
@@ -1063,11 +1065,11 @@ class NewController:
             self.pipeline_image_path = None
 
     def on_sarhub_error(self, error_message: str):
-        """Обработка ошибок SAR-HUB классификации"""
+        """Обработка ошибок YOLOv11m-инференса"""
         self.set_ui_enabled(True)
         self.view.progress_bar.setVisible(False)
-        self.view.sarhub_status_label.setText("Ошибка классификации")
-        self.view.show_error(f"Ошибка SAR-HUB классификации: {error_message}")
+        self.view.sarhub_status_label.setText("Ошибка YOLOv11m-инференса")
+        self.view.show_error(f"Ошибка YOLOv11m-инференса: {error_message}")
         
     def on_detection_finished(self, results):
         """Обработка завершения детекции"""
@@ -1097,20 +1099,41 @@ class NewController:
         hint = "\n\nПодсказка: убедитесь, что установлен onnxruntime (pip install -r requirements.txt) и файл модели YOLO расположен по пути main/algorythms/area_selection/sar_gate_yolo/models/yolo_cpu.onnx."
         self.view.show_error(f"Ошибка детекции: {error_message}{hint}")
         
-    def _run_roi_analysis_for_image(self, image_path: str):
-        """Внутренний запуск анализа зон интересов для указанного изображения"""
-        roi_type = self.view.roi_type_combo.currentText()
-        sensitivity = self.view.roi_sensitivity_slider.value()
-        
-        # Запоминаем путь изображения для последующей SAR-HUB классификации по ROI
+    def _run_roi_analysis_for_image(
+        self,
+        image_path: str,
+        *,
+        roi_type: Optional[str] = None,
+        sensitivity: Optional[int] = None,
+        bright_min: Optional[int] = None,
+        bright_max: Optional[int] = None,
+    ):
+        """Запуск анализа зон интересов. Параметры ROI можно передать явно (например, снимок
+        настроек на момент нажатия «Полный SAR пайплайн» до отключения виджетов)."""
+        # Всегда читаем настройки до set_ui_enabled(False): у отключённых слайдеров
+        # значение обычно корректное, но явный снимок исключает артефакты UI.
+        eff_roi_type = roi_type if roi_type is not None else self.view.roi_type_combo.currentText()
+        eff_sensitivity = (
+            sensitivity if sensitivity is not None else self.view.roi_sensitivity_slider.value()
+        )
+        eff_bright_min = (
+            bright_min if bright_min is not None else self.view.roi_brightness_min_slider.value()
+        )
+        eff_bright_max = (
+            bright_max if bright_max is not None else self.view.roi_brightness_max_slider.value()
+        )
+
         self.last_roi_image_path = image_path
-        
+
         self.set_ui_enabled(False)
-        
-        # Яркость из интерфейса
-        bright_min = self.view.roi_brightness_min_slider.value()
-        bright_max = self.view.roi_brightness_max_slider.value()
-        worker = ROIWorker(image_path, roi_type, sensitivity, bright_min, bright_max)
+
+        worker = ROIWorker(
+            image_path,
+            eff_roi_type,
+            eff_sensitivity,
+            eff_bright_min,
+            eff_bright_max,
+        )
         worker.progress.connect(self.view.update_progress)
         worker.finished.connect(self.on_roi_finished)
         worker.error.connect(self.on_roi_error)
@@ -1136,7 +1159,7 @@ class NewController:
         
         # Показываем детекцию во вкладке ROI
         self.view.roi_results_list.clear()
-        # Сохраняем регионы для последующей SAR-HUB классификации
+        # Сохраняем регионы для последующего YOLOv11m-инференса
         self.last_roi_regions = results.get("regions", [])
         if 'image_with_boxes' in results:
             cnt = int(results.get('count', 0))
@@ -1151,7 +1174,7 @@ class NewController:
             self.view.roi_analysis_view.set_image(results['roi_image'])
         
         # Если активен полнофункциональный пайплайн,
-        # после ROI сразу запускаем классификацию SAR-HUB по найденным областям.
+        # после ROI сразу запускаем YOLOv11m по найденным областям.
         if self.pipeline_active and self.pipeline_image_path:
             # Убедимся, что путь и регионы заданы
             self.last_roi_image_path = self.pipeline_image_path
@@ -1193,7 +1216,7 @@ class NewController:
         Полный SAR‑пайплайн:
         1) Улучшение изображения выбранным алгоритмом;
         2) Анализ зон интересов (ROI) по улучшенному снимку;
-        3) Классификация каждой найденной зоны с помощью SAR-HUB ResNet-18 TSX
+        3) YOLOv11m-инференс каждой найденной зоны
            и просмотр результатов во вкладке «Предсказание модели» (стрелки ← / →).
         """
         image_path = self._current_image_path()
@@ -1203,7 +1226,14 @@ class NewController:
 
         enhance_type = self.view.enhance_type_combo.currentText()
         intensity = self.view.enhance_intensity_slider.value()
-        
+
+        # Снимок настроек ROI до любого set_ui_enabled(False) — они же,
+        # что сейчас на вкладке «Зоны интересов».
+        roi_type_snap = self.view.roi_type_combo.currentText()
+        sensitivity_snap = self.view.roi_sensitivity_slider.value()
+        bright_min_snap = self.view.roi_brightness_min_slider.value()
+        bright_max_snap = self.view.roi_brightness_max_slider.value()
+
         try:
             # Импортируем алгоритм улучшения
             from main.algorythms.improvment.image_enhancement import ImageEnhancement
@@ -1252,12 +1282,15 @@ class NewController:
             # Включаем режим последовательного пайплайна и запоминаем путь
             self.pipeline_active = True
             self.pipeline_image_path = enhanced_path
-            # Запоминаем настройки улучшения для SAR-HUB по ROI
-            self.sarhub_enhance_method = method
-            self.sarhub_enhance_intensity = intensity
-            
-            # Шаг 2: ROI‑анализ по улучшенному изображению (асинхронно)
-            self._run_roi_analysis_for_image(enhanced_path)
+
+            # Шаг 2: ROI‑анализ по улучшенному изображению (настройки ROI — с момента клика)
+            self._run_roi_analysis_for_image(
+                enhanced_path,
+                roi_type=roi_type_snap,
+                sensitivity=sensitivity_snap,
+                bright_min=bright_min_snap,
+                bright_max=bright_max_snap,
+            )
             
         except Exception as e:
             self.set_ui_enabled(True)
@@ -1323,7 +1356,7 @@ class NewController:
         """
         Улучшение качества текущего маленького фрагмента (ROI), который показан
         в окне 'Предсказание модели' на главной вкладке.
-        Влияет только на визуализацию, не на классификацию SAR-HUB.
+        Влияет только на визуализацию, не на YOLOv11m-инференс.
         """
         if not self.sarhub_roi_results:
             self.view.show_error("Нет фрагментов для улучшения. Сначала выполните полный SAR‑пайплайн.")
@@ -1402,7 +1435,7 @@ class NewController:
         self.view.enhance_save_btn.setEnabled(enabled)
         if hasattr(self.view, "enhance_pipeline_btn"):
             self.view.enhance_pipeline_btn.setEnabled(enabled)
-        # Классификация SAR-HUB
+        # YOLOv11m-инференс
         if hasattr(self.view, "sarhub_classify_btn"):
             self.view.sarhub_classify_btn.setEnabled(enabled)
         if hasattr(self.view, "sarhub_prev_btn"):
@@ -1415,7 +1448,7 @@ class NewController:
         else:
             self.view.progress_bar.setVisible(False)
 
-    # ---------- Навигация по результатам SAR-HUB ----------
+    # ---------- Навигация по результатам YOLOv11m ----------
 
     def _show_current_sarhub_roi(self):
         """Показывает текущий ROI‑кроп и обновляет подписи"""
@@ -1451,14 +1484,14 @@ class NewController:
             self.view.sarhub_status_label.setText(f"Зона {idx+1}/{total}: результаты отсутствуют")
 
     def show_next_sarhub_roi(self):
-        """Показать следующую зону SAR-HUB"""
+        """Показать следующую зону YOLOv11m"""
         if not self.sarhub_roi_results:
             return
         self.sarhub_roi_index = (self.sarhub_roi_index + 1) % len(self.sarhub_roi_results)
         self._show_current_sarhub_roi()
 
     def show_prev_sarhub_roi(self):
-        """Показать предыдущую зону SAR-HUB"""
+        """Показать предыдущую зону YOLOv11m"""
         if not self.sarhub_roi_results:
             return
         self.sarhub_roi_index = (self.sarhub_roi_index - 1) % len(self.sarhub_roi_results)
