@@ -28,3 +28,9 @@ __pycache__/
 *.pyo
 
 tmp/
+tmp/remote/
+
+# Demo image server
+image_server/.thumbnails/
+image_server/storage/*
+!image_server/storage/.gitkeep

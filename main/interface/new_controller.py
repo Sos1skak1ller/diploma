@@ -406,6 +406,74 @@ class SarHubClassificationWorker(QThread):
             self.error.emit(str(e))
 
 
+class RemoteListWorker(QThread):
+    """Получает список доступных снимков с демо-сервера (без скачивания)."""
+
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, base_url: str, api_key: Optional[str] = None):
+        super().__init__()
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self):
+        try:
+            from main.interface.remote_client import RemoteImageClient, RemoteClientError
+            with RemoteImageClient(self.base_url, api_key=self.api_key) as client:
+                items = client.list_images()
+            self.finished.emit([
+                {
+                    "id": it.id,
+                    "name": it.name,
+                    "relative_path": it.relative_path,
+                    "size": it.size,
+                    "modified": it.modified,
+                    "content_type": it.content_type,
+                }
+                for it in items
+            ])
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class RemoteDownloadWorker(QThread):
+    """Скачивает один снимок по id с демо-сервера во временный кэш."""
+
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, base_url: str, image_id: str, dest_path: str, api_key: Optional[str] = None):
+        super().__init__()
+        self.base_url = base_url
+        self.image_id = image_id
+        self.dest_path = dest_path
+        self.api_key = api_key
+
+    def run(self):
+        try:
+            from main.interface.remote_client import RemoteImageClient
+            from pathlib import Path
+
+            self.progress.emit(5, f"Скачивание {os.path.basename(self.dest_path)}...")
+
+            def _on_progress(downloaded: int, total: int):
+                if total > 0:
+                    pct = max(5, min(99, int(downloaded * 100 / total)))
+                else:
+                    pct = 50
+                self.progress.emit(pct, f"Скачивание... {downloaded // 1024} КБ")
+
+            with RemoteImageClient(self.base_url, api_key=self.api_key) as client:
+                client.download(self.image_id, Path(self.dest_path), progress=_on_progress)
+
+            self.progress.emit(100, "Снимок скачан")
+            self.finished.emit({"image_id": self.image_id, "path": self.dest_path})
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class NewController:
     def __init__(self, view):
         self.view = view
@@ -422,6 +490,15 @@ class NewController:
         # Параметры улучшения для SAR-HUB (используются в полном пайплайне)
         self.sarhub_enhance_method: Optional[str] = None
         self.sarhub_enhance_intensity: Optional[int] = None
+
+        # Источник изображений: "local" | "remote"
+        self.image_source: str = "local"
+        # Метаданные удалённых снимков: { id -> dict }
+        self._remote_images: dict = {}
+        # Каталог для скачанных файлов
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        self._remote_cache_dir = os.path.join(root_dir, "tmp", "remote")
+
         self.setup_connections()
 
     # ---------- Вспомогательные безопасные методы для UI ----------
@@ -442,9 +519,22 @@ class NewController:
         
         # Главная вкладка - загрузка/сохранение; детекция доступна во вкладке ROI
         self.view.browse_btn.clicked.connect(self.browse_files_main)
+        if hasattr(self.view, "browse_dir_btn"):
+            self.view.browse_dir_btn.clicked.connect(self.browse_dir_main)
         self.view.detect_btn.setEnabled(False)
         self.view.detect_btn.setToolTip("Детекция доступна во вкладке 'Зоны интересов'")
         self.view.save_results_btn.clicked.connect(self.save_detection_results)
+
+        # Подсветка выбранного изображения в file_list
+        if hasattr(self.view, "file_list"):
+            self.view.file_list.currentItemChanged.connect(self.on_file_list_current_changed)
+            self.view.file_list.itemDoubleClicked.connect(self.on_file_list_double_clicked)
+
+        # Переключатель источника снимков (Локально / Сервер)
+        if hasattr(self.view, "source_local_radio"):
+            self.view.source_local_radio.toggled.connect(self._on_source_changed)
+        if hasattr(self.view, "refresh_remote_btn"):
+            self.view.refresh_remote_btn.clicked.connect(self.refresh_remote_images)
 
         # Классификация сцены SAR-HUB на главной вкладке
         if hasattr(self.view, "sarhub_classify_btn"):
@@ -486,14 +576,218 @@ class NewController:
             "",
             "Изображения (*.jpg *.jpeg *.png *.bmp *.tiff);;Все файлы (*)"
         )
-        
+
         if files:
             self.view.file_list.clear()
             for file in files:
-                item = QListWidgetItem(os.path.basename(file))
-                item.setData(1, file)  # Сохраняем полный путь
-                self.view.file_list.addItem(item)
-                
+                self._add_file_item(file)
+            if self.view.file_list.count() > 0:
+                self.view.file_list.setCurrentRow(0)
+
+    def browse_dir_main(self):
+        """Выбор директории — рекурсивно подбирает все изображения по расширениям."""
+        from pathlib import Path
+        folder = QFileDialog.getExistingDirectory(
+            self.view,
+            "Выберите папку со снимками",
+            ""
+        )
+        if not folder:
+            return
+
+        exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+        added = 0
+        for p in sorted(Path(folder).rglob("*")):
+            if p.is_file() and p.suffix.lower() in exts:
+                self._add_file_item(str(p))
+                added += 1
+
+        if added == 0:
+            self.view.show_error(
+                f"В выбранной папке не найдено изображений ({', '.join(sorted(exts))})."
+            )
+        elif self.view.file_list.currentRow() < 0:
+            self.view.file_list.setCurrentRow(0)
+
+    def _add_file_item(self, file_path: str):
+        """Добавляет элемент в file_list, не дублируя уже присутствующие пути."""
+        for i in range(self.view.file_list.count()):
+            existing = self.view.file_list.item(i)
+            if existing and existing.data(1) == file_path:
+                return
+        item = QListWidgetItem(os.path.basename(file_path))
+        item.setData(1, file_path)
+        item.setToolTip(file_path)
+        self.view.file_list.addItem(item)
+
+    def _current_image_path(self) -> Optional[str]:
+        """Возвращает путь к выбранному (или первому) изображению из file_list."""
+        if self.view.file_list.count() == 0:
+            return None
+        item = self.view.file_list.currentItem() or self.view.file_list.item(0)
+        if item is None:
+            return None
+        path = item.data(1)
+        return str(path) if path else None
+
+    def on_file_list_current_changed(self, current, _previous):
+        """Обновляет превью оригинального изображения при смене активного элемента."""
+        if current is None:
+            return
+        path = current.data(1)
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            self.view.original_view.set_image(path)
+        except Exception:
+            pass
+
+    def on_file_list_double_clicked(self, item):
+        """Двойной клик — делает файл активным (а для удалённых — скачивает)."""
+        if item is None:
+            return
+        self.view.file_list.setCurrentItem(item)
+
+        if self.image_source == "remote":
+            image_id = item.data(2)
+            if image_id and not item.data(1):
+                self._download_remote_image(item, image_id)
+                return
+
+        self.on_file_list_current_changed(item, None)
+
+    # ---------- Источник изображений: локально / сервер ----------
+
+    def _set_remote_status(self, message: str, *, is_error: bool = False):
+        if not hasattr(self.view, "remote_status_label"):
+            return
+        self.view.remote_status_label.setText(message)
+        color = "#ff7777" if is_error else "#cccccc"
+        self.view.remote_status_label.setStyleSheet(f"color: {color};")
+        self.view.remote_status_label.setVisible(bool(message))
+
+    def _on_source_changed(self, _checked: bool):
+        if not hasattr(self.view, "source_local_radio"):
+            return
+        is_local = self.view.source_local_radio.isChecked()
+        self.image_source = "local" if is_local else "remote"
+
+        if hasattr(self.view, "browse_btn"):
+            self.view.browse_btn.setVisible(is_local)
+        if hasattr(self.view, "browse_dir_btn"):
+            self.view.browse_dir_btn.setVisible(is_local)
+        if hasattr(self.view, "remote_row_widget"):
+            self.view.remote_row_widget.setVisible(not is_local)
+        if hasattr(self.view, "remote_status_label"):
+            self.view.remote_status_label.setVisible(not is_local)
+
+        self.view.file_list.clear()
+        self._remote_images.clear()
+        if not is_local:
+            self._set_remote_status("Нажмите «Обновить список», чтобы загрузить снимки с сервера.")
+        else:
+            self._set_remote_status("")
+
+    def _server_url(self) -> str:
+        if not hasattr(self.view, "server_url_edit"):
+            return "http://localhost:8000"
+        url = self.view.server_url_edit.text().strip()
+        return url or "http://localhost:8000"
+
+    def refresh_remote_images(self):
+        """Запрашивает список снимков с сервера в фоне."""
+        if self.image_source != "remote":
+            return
+        url = self._server_url()
+        self._set_remote_status(f"Запрос списка снимков: {url} ...")
+        if hasattr(self.view, "refresh_remote_btn"):
+            self.view.refresh_remote_btn.setEnabled(False)
+
+        worker = RemoteListWorker(url)
+        worker.finished.connect(self._on_remote_list_finished)
+        worker.error.connect(self._on_remote_list_error)
+        self.current_workers.append(worker)
+        worker.start()
+
+    def _on_remote_list_finished(self, items: list):
+        if hasattr(self.view, "refresh_remote_btn"):
+            self.view.refresh_remote_btn.setEnabled(True)
+
+        self.view.file_list.clear()
+        self._remote_images = {it["id"]: it for it in items if it.get("id")}
+
+        if not self._remote_images:
+            self._set_remote_status("На сервере нет снимков.", is_error=False)
+            return
+
+        for it in items:
+            label = it.get("relative_path") or it.get("name") or it.get("id", "?")
+            size_kb = max(1, int(it.get("size", 0) // 1024))
+            qitem = QListWidgetItem(f"{label}  ({size_kb} КБ)")
+            qitem.setData(1, "")
+            qitem.setData(2, it.get("id", ""))
+            qitem.setToolTip(
+                f"ID: {it.get('id', '')}\n"
+                f"Изменён: {it.get('modified', '')}\n"
+                "Двойной клик — скачать и сделать активным"
+            )
+            self.view.file_list.addItem(qitem)
+
+        self._set_remote_status(
+            f"Получено {len(items)} снимков. Двойной клик — скачать и обработать."
+        )
+
+    def _on_remote_list_error(self, message: str):
+        if hasattr(self.view, "refresh_remote_btn"):
+            self.view.refresh_remote_btn.setEnabled(True)
+        self._set_remote_status(f"Ошибка: {message}", is_error=True)
+
+    def _download_remote_image(self, item: QListWidgetItem, image_id: str):
+        meta = self._remote_images.get(image_id, {})
+        name = meta.get("name") or f"{image_id}.bin"
+
+        os.makedirs(self._remote_cache_dir, exist_ok=True)
+        safe_name = name.replace("/", "_").replace("\\", "_")
+        dest = os.path.join(self._remote_cache_dir, f"{image_id}_{safe_name}")
+
+        # Если файл уже скачан ранее — переиспользуем
+        if os.path.isfile(dest):
+            item.setData(1, dest)
+            self.on_file_list_current_changed(item, None)
+            return
+
+        self.set_ui_enabled(False)
+        self._set_remote_status(f"Скачивание {name}...")
+
+        worker = RemoteDownloadWorker(
+            base_url=self._server_url(),
+            image_id=image_id,
+            dest_path=dest,
+        )
+        worker.progress.connect(self.view.update_progress)
+
+        def _on_finished(payload: dict):
+            self.set_ui_enabled(True)
+            self.view.progress_bar.setVisible(False)
+            path = payload.get("path", "")
+            if path and os.path.isfile(path):
+                item.setData(1, path)
+                self._set_remote_status(f"Скачано: {os.path.basename(path)}")
+                self.view.file_list.setCurrentItem(item)
+                self.on_file_list_current_changed(item, None)
+            else:
+                self._set_remote_status("Скачивание не удалось.", is_error=True)
+
+        def _on_error(message: str):
+            self.set_ui_enabled(True)
+            self.view.progress_bar.setVisible(False)
+            self._set_remote_status(f"Ошибка: {message}", is_error=True)
+
+        worker.finished.connect(_on_finished)
+        worker.error.connect(_on_error)
+        self.current_workers.append(worker)
+        worker.start()
+
     def _run_detection_for_image(self, image_path: str):
         """Внутренний запуск детекции объектов для указанного изображения"""
         confidence = self.view.confidence_slider.value() / 100.0
@@ -514,15 +808,11 @@ class NewController:
         self.view.original_view.set_image(image_path)
         
     def start_detection(self):
-        """Запуск детекции объектов для первого изображения в списке"""
-        if self.view.file_list.count() == 0:
+        """Запуск детекции объектов для выбранного изображения"""
+        image_path = self._current_image_path()
+        if not image_path:
             self.view.show_error("Выберите изображения для анализа")
             return
-            
-        item = self.view.file_list.item(0)
-        if not item:
-            return
-        image_path = item.data(1)
         self._run_detection_for_image(image_path)
 
     def start_sarhub_classification(self):
@@ -832,15 +1122,11 @@ class NewController:
         self.view.roi_source_view.set_image(image_path)
         
     def start_roi_analysis(self):
-        """Запуск анализа зон интересов для первого изображения в списке"""
-        if self.view.file_list.count() == 0:
+        """Запуск анализа зон интересов для выбранного изображения"""
+        image_path = self._current_image_path()
+        if not image_path:
             self.view.show_error("Выберите изображения для анализа")
             return
-            
-        item = self.view.file_list.item(0)
-        if not item:
-            return
-        image_path = item.data(1)
         self._run_roi_analysis_for_image(image_path)
         
     def on_roi_finished(self, results):
@@ -880,16 +1166,12 @@ class NewController:
         self.view.show_error(f"Ошибка анализа ROI: {error_message}")
         
     def start_enhancement(self):
-        """Запуск улучшения качества"""
-        if self.view.file_list.count() == 0:
+        """Запуск улучшения качества для выбранного изображения"""
+        image_path = self._current_image_path()
+        if not image_path:
             self.view.show_error("Выберите изображения для улучшения")
             return
-            
-        item = self.view.file_list.item(0)
-        if not item:
-            return
-            
-        image_path = item.data(1)
+
         enhance_type = self.view.enhance_type_combo.currentText()
         intensity = self.view.enhance_intensity_slider.value()
         
@@ -914,15 +1196,11 @@ class NewController:
         3) Классификация каждой найденной зоны с помощью SAR-HUB ResNet-18 TSX
            и просмотр результатов во вкладке «Предсказание модели» (стрелки ← / →).
         """
-        if self.view.file_list.count() == 0:
+        image_path = self._current_image_path()
+        if not image_path:
             self.view.show_error("Выберите изображения для анализа")
             return
-            
-        item = self.view.file_list.item(0)
-        if not item:
-            return
-            
-        image_path = item.data(1)
+
         enhance_type = self.view.enhance_type_combo.currentText()
         intensity = self.view.enhance_intensity_slider.value()
         

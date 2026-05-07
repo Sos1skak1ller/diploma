@@ -1,12 +1,13 @@
 import os
 import sys
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, 
-                             QVBoxLayout, QHBoxLayout, QSplitter, QLabel, 
-                             QPushButton, QSlider, QSpinBox, QLineEdit, 
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
+                             QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
+                             QPushButton, QSlider, QSpinBox, QLineEdit,
                              QTextEdit, QFileDialog, QMessageBox, QProgressBar,
                              QFrame, QScrollArea, QGroupBox, QGridLayout,
                              QComboBox, QCheckBox, QListWidget, QListWidgetItem,
-                             QTableWidget, QHeaderView)
+                             QTableWidget, QHeaderView, QAbstractItemView,
+                             QRadioButton, QButtonGroup)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRectF, QPointF
 from PyQt5.QtGui import QPixmap, QWheelEvent, QMouseEvent, QFont, QPalette, QColor
 from .view import MyGraphicsView, TableWidget
@@ -230,27 +231,55 @@ class MainInterface(QMainWindow):
         # Группа загрузки файлов
         upload_group = QGroupBox("Загрузка файлов")
         upload_layout = QVBoxLayout(upload_group)
-        
-        self.upload_area = QLabel("Перетащите файлы сюда")
-        self.upload_area.setMinimumHeight(100)
-        self.upload_area.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #777777;
-                border-radius: 5px;
-                background-color: #404040;
-                text-align: center;
-                color: #cccccc;
-            }
-        """)
-        self.upload_area.setAlignment(Qt.AlignCenter)
-        upload_layout.addWidget(self.upload_area)
-        
+
+        # --- Источник изображений: локально / удалённый сервер ---
+        source_row = QHBoxLayout()
+        self.source_local_radio = QRadioButton("Локально")
+        self.source_local_radio.setChecked(True)
+        self.source_remote_radio = QRadioButton("Сервер")
+        self.source_button_group = QButtonGroup(self)
+        self.source_button_group.addButton(self.source_local_radio)
+        self.source_button_group.addButton(self.source_remote_radio)
+        source_row.addWidget(QLabel("Источник:"))
+        source_row.addWidget(self.source_local_radio)
+        source_row.addWidget(self.source_remote_radio)
+        source_row.addStretch()
+        upload_layout.addLayout(source_row)
+
+        # Локальный режим: выбор файлов / выбор папки
+        local_buttons_row = QHBoxLayout()
         self.browse_btn = QPushButton("Выбрать файлы")
-        upload_layout.addWidget(self.browse_btn)
-        
+        self.browse_dir_btn = QPushButton("Выбрать папку")
+        local_buttons_row.addWidget(self.browse_btn)
+        local_buttons_row.addWidget(self.browse_dir_btn)
+        upload_layout.addLayout(local_buttons_row)
+
+        # Удалённый режим: URL + кнопка обновить (скрыто по умолчанию)
+        remote_row = QHBoxLayout()
+        remote_row.addWidget(QLabel("URL:"))
+        self.server_url_edit = QLineEdit("http://localhost:8000")
+        self.server_url_edit.setPlaceholderText("http://localhost:8000")
+        remote_row.addWidget(self.server_url_edit)
+        self.refresh_remote_btn = QPushButton("Обновить список")
+        remote_row.addWidget(self.refresh_remote_btn)
+        self.remote_row_widget = QWidget()
+        self.remote_row_widget.setLayout(remote_row)
+        self.remote_row_widget.setVisible(False)
+        upload_layout.addWidget(self.remote_row_widget)
+
+        self.remote_status_label = QLabel("")
+        self.remote_status_label.setStyleSheet("color: #cccccc;")
+        self.remote_status_label.setVisible(False)
+        upload_layout.addWidget(self.remote_status_label)
+
         self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.file_list.setToolTip(
+            "Выделите изображение, чтобы оно стало активным для пайплайна\n"
+            "(двойной клик — также делает файл активным)"
+        )
         upload_layout.addWidget(self.file_list)
-        
+
         layout.addWidget(upload_group)
         
         # Группа настроек детекции
