@@ -24,10 +24,27 @@ def get_default_yolov11_weights_path(project_root: Path) -> Path:
 
 
 def select_torch_device() -> str:
-    """Prefer Apple Silicon MPS, fall back to CPU."""
+    """Pick a device for YOLOv11 inference.
+
+    Priority:
+      1) YOLO_DEVICE env variable (``cpu`` / ``cuda`` / ``mps``) — explicit override.
+      2) CUDA, если доступна (NVIDIA GPU).
+      3) CPU — безопасный дефолт.
+
+    MPS (Apple Silicon) намеренно НЕ выбирается автоматически: torchvision::nms,
+    который Ultralytics использует для постпроцессинга, пока не реализован для
+    MPS (см. https://github.com/pytorch/pytorch/issues/77764). Чтобы всё-таки
+    использовать MPS с CPU‑fallback, выставьте переменные окружения::
+
+        export PYTORCH_ENABLE_MPS_FALLBACK=1
+        export YOLO_DEVICE=mps
+    """
+    forced = os.environ.get("YOLO_DEVICE", "").strip().lower()
+    if forced in {"cpu", "cuda", "mps"}:
+        return forced
     try:
-        if torch.backends.mps.is_available():
-            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
     except Exception:
         pass
     return "cpu"

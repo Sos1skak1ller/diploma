@@ -1,0 +1,18 @@
+services:
+  image_server:
+    build: .
+    image: sar-demo-image-server:latest
+    container_name: sar_demo_image_server
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      STORAGE_DIR: /app/storage
+      THUMBNAIL_DIR: /app/.thumbnails
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - ./storage:/app/storage:ro
+      - thumbnails_cache:/app/.thumbnails
+    restart: unless-stopped
+
+volumes:
+  thumbnails_cache:
