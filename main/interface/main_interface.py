@@ -265,11 +265,11 @@ class MainInterface(QMainWindow):
         
         layout.addWidget(settings_group)
 
-        # Группа классификации SAR-HUB
-        sarhub_group = QGroupBox("Классификация сцены (SAR-HUB ResNet-18 TSX)")
+        # Группа YOLOv11m-инференса по ROI
+        sarhub_group = QGroupBox("Инференс объектов (YOLOv11m)")
         sarhub_layout = QVBoxLayout(sarhub_group)
 
-        self.sarhub_classify_btn = QPushButton("Классифицировать SAR сцену")
+        self.sarhub_classify_btn = QPushButton("Запустить YOLOv11m по зонам")
         sarhub_layout.addWidget(self.sarhub_classify_btn)
 
         self.sarhub_status_label = QLabel("Модель не запущена")
@@ -312,7 +312,7 @@ class MainInterface(QMainWindow):
         self.prediction_view = MyGraphicsView()
         prediction_layout.addWidget(self.prediction_view)
 
-        # Навигация по зонам (ROI), для которых выполнена классификация SAR-HUB
+        # Навигация по зонам (ROI), для которых выполнен YOLOv11m-инференс
         nav_layout = QHBoxLayout()
         self.sarhub_prev_btn = QPushButton("←")
         self.sarhub_next_btn = QPushButton("→")
