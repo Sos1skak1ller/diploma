@@ -34,3 +34,4 @@ tmp/remote/
 image_server/.thumbnails/
 image_server/storage/*
 !image_server/storage/.gitkeep
+Веса/YOLOv11m/best.pt
