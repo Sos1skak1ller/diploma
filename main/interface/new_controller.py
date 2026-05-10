@@ -479,8 +479,14 @@ class NewController:
         # Флаг и путь для последовательного пайплайна улучшение → ROI → YOLO
         self.pipeline_active = False
         self.pipeline_image_path = None
-        # Последние результаты анализа ROI (для YOLOv11m-инференса)
+        # Последние результаты анализа ROI (для YOLOv11m-инференса).
+        # last_roi_image_path — путь к снимку, на котором реально считались ROI
+        # (часто — улучшенный во временной директории).
+        # last_roi_source_image_path — путь к исходному снимку из file_list,
+        # с которого начался текущий пайплайн. Используется, чтобы понимать,
+        # «протухли» ли результаты после смены активного файла в списке.
         self.last_roi_image_path: Optional[str] = None
+        self.last_roi_source_image_path: Optional[str] = None
         self.last_roi_regions: list = []
         # Результаты YOLOv11m по зонам и текущий индекс
         self.sarhub_roi_results: list = []
@@ -625,12 +631,29 @@ class NewController:
         return str(path) if path else None
 
     def on_file_list_current_changed(self, current, _previous):
-        """Обновляет превью оригинального изображения при смене активного элемента."""
+        """Обновляет превью оригинального изображения при смене активного элемента.
+
+        Дополнительно сбрасывает результаты предыдущего ROI/пайплайна,
+        если активным стал другой файл — иначе кнопка YOLOv11m продолжала
+        бы работать по старому изображению.
+        """
         if current is None:
             return
         path = current.data(1)
         if not path or not os.path.isfile(path):
             return
+
+        # Сравниваем именно с исходным путём пайплайна — улучшенный снимок
+        # лежит во временной директории и формально не совпадает с тем,
+        # что выбрано в списке.
+        roi_source = self.last_roi_source_image_path or self.last_roi_image_path
+        if roi_source and roi_source != path:
+            self.last_roi_image_path = None
+            self.last_roi_source_image_path = None
+            self.last_roi_regions = []
+            self.sarhub_roi_results = []
+            self.sarhub_roi_index = 0
+
         try:
             self.view.original_view.set_image(path)
         except Exception:
@@ -810,14 +833,36 @@ class NewController:
         self._run_detection_for_image(image_path)
 
     def start_sarhub_classification(self):
-        """Запуск YOLOv11m по найденным зонам интересов (ROI)
-        
-        Используются результаты последнего анализа во вкладке 'Зоны интересов'.
+        """Запуск YOLOv11m по найденным зонам интересов (ROI).
+
+        Если ROI ещё не считались либо они посчитаны для другого
+        изображения, открываем интерактивный мастер пайплайна — он сам
+        подготовит улучшение и зоны, а затем вернётся сюда уже с
+        заполненными ``last_roi_*`` под актуальный снимок.
         """
-        if not self.last_roi_image_path or not self.last_roi_regions:
+        current_path = self._current_image_path()
+        roi_source = self.last_roi_source_image_path or self.last_roi_image_path
+
+        roi_is_stale = (
+            not self.last_roi_image_path
+            or not self.last_roi_regions
+            or (current_path and roi_source and roi_source != current_path)
+        )
+
+        if roi_is_stale:
+            if current_path:
+                # Сбрасываем потенциально устаревшие данные перед открытием мастера —
+                # иначе после Cancel в нём осталась бы старая инфа.
+                self.last_roi_image_path = None
+                self.last_roi_source_image_path = None
+                self.last_roi_regions = []
+                self.sarhub_roi_results = []
+                self.sarhub_roi_index = 0
+                self.start_full_pipeline()
+                return
             self.view.show_error(
-                "Сначала выполните анализ зон интересов во вкладке 'Зоны интересов',\n"
-                "затем запустите YOLOv11m-инференс."
+                "Выберите изображение в списке и запустите «Полный SAR пайплайн» "
+                "или анализ зон интересов."
             )
             return
 
@@ -1212,90 +1257,60 @@ class NewController:
         self.view.enhance_original_view.set_image(image_path)
         
     def start_full_pipeline(self):
-        """
-        Полный SAR‑пайплайн:
-        1) Улучшение изображения выбранным алгоритмом;
-        2) Анализ зон интересов (ROI) по улучшенному снимку;
-        3) YOLOv11m-инференс каждой найденной зоны
-           и просмотр результатов во вкладке «Предсказание модели» (стрелки ← / →).
+        """Запустить интерактивный мастер полного SAR‑пайплайна.
+
+        Открывает модальное окно ``PipelineWizardDialog``, в котором
+        пользователь поэтапно (улучшение → зоны интересов) подбирает
+        параметры на одном изображении. По завершении мастера запускается
+        обычный YOLOv11m‑инференс по найденным зонам и отрисовка результатов
+        на главной странице — точно так же, как раньше.
         """
         image_path = self._current_image_path()
         if not image_path:
-            self.view.show_error("Выберите изображения для анализа")
+            self.view.show_error("Выберите изображение для пайплайна")
             return
 
-        enhance_type = self.view.enhance_type_combo.currentText()
-        intensity = self.view.enhance_intensity_slider.value()
-
-        # Снимок настроек ROI до любого set_ui_enabled(False) — они же,
-        # что сейчас на вкладке «Зоны интересов».
-        roi_type_snap = self.view.roi_type_combo.currentText()
-        sensitivity_snap = self.view.roi_sensitivity_slider.value()
-        bright_min_snap = self.view.roi_brightness_min_slider.value()
-        bright_max_snap = self.view.roi_brightness_max_slider.value()
-
         try:
-            # Импортируем алгоритм улучшения
-            from main.algorythms.improvment.image_enhancement import ImageEnhancement
-            enhancer = ImageEnhancement()
-            
-            # Маппинг текста интерфейса на внутренние методы
-            method_map = {
-                'Гибридное подавление шума SAR': 'hybrid_sar_denoise',
-                'Адаптивное подавление спекла SAR': 'sar_adaptive',
-                'Анизотропная диффузия SAR': 'sar_srad',
-            }
-            method = method_map.get(enhance_type, 'hybrid_sar_denoise')
-            
-            # Шаг 1: улучшение изображения (синхронно в GUI‑потоке, для простоты)
-            self.set_ui_enabled(False)
-            enhanced_img, metrics = enhancer.enhance_image(
-                image_path,
-                method=method,
-                intensity=intensity,
-            )
-            if enhanced_img is None:
-                self.set_ui_enabled(True)
-                self.view.show_error("Не удалось улучшить изображение в полном пайплайне")
-                return
-            
-            # Сохраняем улучшенное изображение во временную директорию
-            tmp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tmp')
-            tmp_dir = os.path.abspath(tmp_dir)
-            os.makedirs(tmp_dir, exist_ok=True)
-            base_name = os.path.splitext(os.path.basename(image_path))[0]
-            enhanced_path = os.path.join(tmp_dir, f"{base_name}_pipeline_enhanced.jpg")
-            enhancer.save_enhanced_image(enhanced_img, enhanced_path)
-            
-            # Обновляем вкладку улучшения
-            self.view.enhance_original_view.set_image(image_path)
-            self.view.enhance_result_view.set_image(enhanced_path)
-            if metrics:
-                quality_text = f"Метрики качества SAR улучшения (полный пайплайн):\n\n"
-                quality_text += f"PSNR: {metrics.get('psnr', 0):.2f} dB\n"
-                quality_text += f"Улучшение контраста: {metrics.get('contrast_improvement', 0):.1f}%\n"
-                quality_text += f"Изменение яркости: {metrics.get('brightness_change', 0):.1f}%\n"
-                quality_text += f"Оригинальный контраст: {metrics.get('original_contrast', 0):.2f}\n"
-                quality_text += f"Улучшенный контраст: {metrics.get('enhanced_contrast', 0):.2f}"
-                self.view.quality_info.setText(quality_text)
-            
-            # Включаем режим последовательного пайплайна и запоминаем путь
-            self.pipeline_active = True
-            self.pipeline_image_path = enhanced_path
+            from main.interface.pipeline_wizard import PipelineWizardDialog
+        except Exception as exc:
+            self.view.show_error(f"Не удалось открыть мастер пайплайна: {exc}")
+            return
 
-            # Шаг 2: ROI‑анализ по улучшенному изображению (настройки ROI — с момента клика)
-            self._run_roi_analysis_for_image(
-                enhanced_path,
-                roi_type=roi_type_snap,
-                sensitivity=sensitivity_snap,
-                bright_min=bright_min_snap,
-                bright_max=bright_max_snap,
+        dlg = PipelineWizardDialog(image_path, parent=self.view)
+        if dlg.exec_() != PipelineWizardDialog.Accepted:
+            return
+
+        final_image = dlg.final_image_path or image_path
+        regions = dlg.final_regions
+
+        # Подсветим в основном UI исходное и итоговое (улучшенное) изображение —
+        # удобно, чтобы пользователь видел результат пайплайна на главной странице.
+        try:
+            self.view.enhance_original_view.set_image(image_path)
+            if final_image and final_image != image_path:
+                self.view.enhance_result_view.set_image(final_image)
+        except Exception:
+            pass
+
+        if not regions:
+            self.view.show_error(
+                "Зоны интересов не найдены — YOLOv11m нечего обрабатывать"
             )
-            
-        except Exception as e:
-            self.set_ui_enabled(True)
-            self.view.show_error(f"Ошибка полного пайплайна: {e}")
-        
+            return
+
+        # Дальше — стандартный путь YOLOv11m‑инференса по ROI.
+        self.last_roi_image_path = final_image
+        # Источник пайплайна — исходный снимок из file_list. По нему мы потом
+        # понимаем, «протухли» ли ROI после переключения активного файла.
+        self.last_roi_source_image_path = image_path
+        self.last_roi_regions = regions
+        # На всякий случай отключаем флаг автозапуска из старого пайплайна,
+        # чтобы on_roi_finished случайно не дёрнул YOLO повторно.
+        self.pipeline_active = False
+        self.pipeline_image_path = None
+        self.start_sarhub_classification()
+
+
     def on_enhancement_finished(self, results):
         """Обработка завершения улучшения"""
         self.set_ui_enabled(True)

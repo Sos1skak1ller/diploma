@@ -632,12 +632,20 @@ class MainInterface(QMainWindow):
         self.param_info.setText(info_text.get(enhance_type, "Информация недоступна"))
         
     def update_progress(self, progress, filename=""):
-        """Обновляет прогресс бар"""
+        """Обновляет прогресс бар.
+
+        Автоматически показывает бар во время работы и скрывает его, как
+        только прогресс достиг 100% — чтобы не «забивать» дизайн пустой
+        синей полоской после завершения.
+        """
         self.progress_bar.setValue(progress)
-        if filename:
-            self.status_bar.showMessage(f"Обработка: {filename}")
-        else:
+        if progress >= 100:
+            self.progress_bar.setVisible(False)
             self.status_bar.showMessage("Обработка завершена")
+        else:
+            self.progress_bar.setVisible(True)
+            if filename:
+                self.status_bar.showMessage(f"Обработка: {filename}")
             
     def show_error(self, message):
         """Показывает сообщение об ошибке"""
