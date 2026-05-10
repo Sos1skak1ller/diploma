@@ -521,9 +521,8 @@ class NewController:
         self.view.browse_btn.clicked.connect(self.browse_files_main)
         if hasattr(self.view, "browse_dir_btn"):
             self.view.browse_dir_btn.clicked.connect(self.browse_dir_main)
-        self.view.detect_btn.setEnabled(False)
-        self.view.detect_btn.setToolTip("Детекция доступна во вкладке 'Зоны интересов'")
-        self.view.save_results_btn.clicked.connect(self.save_detection_results)
+        if hasattr(self.view, "save_results_btn"):
+            self.view.save_results_btn.clicked.connect(self.save_detection_results)
 
         # Подсветка выбранного изображения в file_list
         if hasattr(self.view, "file_list"):
@@ -553,10 +552,6 @@ class NewController:
         
         # Вкладка улучшения качества
         self.view.enhance_btn.clicked.connect(self.start_enhancement)
-        # Полный конвейер: улучшение → ROI → YOLO
-        if hasattr(self.view, "enhance_pipeline_btn"):
-            self.view.enhance_pipeline_btn.clicked.connect(self.start_full_pipeline)
-        self.view.enhance_preview_btn.clicked.connect(self.preview_enhancement)
         self.view.enhance_save_btn.clicked.connect(self.save_enhanced_image)
         
         # Настройка drag and drop
@@ -807,8 +802,8 @@ class NewController:
 
     def _run_detection_for_image(self, image_path: str):
         """Внутренний запуск детекции объектов для указанного изображения"""
-        confidence = self.view.confidence_slider.value() / 100.0
-        
+        confidence = 0.35
+
         # Отключаем кнопки во время обработки
         self.set_ui_enabled(False)
         
@@ -1339,10 +1334,6 @@ class NewController:
         self.view.progress_bar.setVisible(False)
         self.view.show_error(f"Ошибка улучшения: {error_message}")
         
-    def preview_enhancement(self):
-        """Предпросмотр улучшений"""
-        QMessageBox.information(self.view, "Предпросмотр", "Функция предпросмотра в разработке")
-        
     def save_enhanced_image(self):
         """Сохранение улучшенного изображения"""
         file_path, _ = QFileDialog.getSaveFileName(
@@ -1426,30 +1417,26 @@ class NewController:
     def set_ui_enabled(self, enabled):
         """Включение/отключение элементов интерфейса"""
         # Главная вкладка
-        self.view.detect_btn.setEnabled(enabled)
         self.view.browse_btn.setEnabled(enabled)
-        self.view.save_results_btn.setEnabled(enabled)
-        self.view.confidence_slider.setEnabled(enabled)
+        if hasattr(self.view, "save_results_btn"):
+            self.view.save_results_btn.setEnabled(enabled)
         if hasattr(self.view, "roi_frame_method_combo"):
             self.view.roi_frame_method_combo.setEnabled(enabled)
         if hasattr(self.view, "roi_frame_intensity_slider"):
             self.view.roi_frame_intensity_slider.setEnabled(enabled)
         if hasattr(self.view, "roi_frame_enhance_btn"):
             self.view.roi_frame_enhance_btn.setEnabled(enabled)
-        
+
         # Вкладка ROI
         self.view.roi_analyze_btn.setEnabled(enabled)
         self.view.roi_type_combo.setEnabled(enabled)
         self.view.roi_sensitivity_slider.setEnabled(enabled)
-        
+
         # Вкладка улучшения
         self.view.enhance_btn.setEnabled(enabled)
         self.view.enhance_type_combo.setEnabled(enabled)
         self.view.enhance_intensity_slider.setEnabled(enabled)
-        self.view.enhance_preview_btn.setEnabled(enabled)
         self.view.enhance_save_btn.setEnabled(enabled)
-        if hasattr(self.view, "enhance_pipeline_btn"):
-            self.view.enhance_pipeline_btn.setEnabled(enabled)
         # YOLOv11m-инференс
         if hasattr(self.view, "sarhub_classify_btn"):
             self.view.sarhub_classify_btn.setEnabled(enabled)

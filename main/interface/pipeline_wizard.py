@@ -244,7 +244,6 @@ class _RoiStagePage(_StagePageBase):
         self.roi_type_combo.addItems([
             "Автоматическое выделение",
             "Ручное выделение",
-            "По координатам",
         ])
         group_layout.addWidget(self.roi_type_combo)
 

@@ -119,7 +119,7 @@ class MainInterface(QMainWindow):
     def create_main_tab(self):
         """Главная вкладка - детекция объектов"""
         main_tab = QWidget()
-        self.tab_widget.addTab(main_tab, "Главная - Детекция объектов")
+        self.tab_widget.addTab(main_tab, "Главная страница")
         
         # Основной layout
         main_layout = QHBoxLayout(main_tab)
@@ -189,20 +189,9 @@ class MainInterface(QMainWindow):
         # Группа параметров фрагментов и классификации
         fragments_group = QGroupBox("Фрагменты и параметры классификации")
         fragments_layout = QGridLayout(fragments_group)
-        
-        # Уверенность классификатора (как раньше)
-        fragments_layout.addWidget(QLabel("Уверенность классификатора:"), 0, 0)
-        self.confidence_label = QLabel("0.35")
-        fragments_layout.addWidget(self.confidence_label, 0, 1)
-        
-        self.confidence_slider = QSlider(Qt.Horizontal)
-        self.confidence_slider.setRange(1, 100)
-        self.confidence_slider.setValue(35)
-        self.confidence_slider.valueChanged.connect(self.update_confidence_label)
-        fragments_layout.addWidget(self.confidence_slider, 1, 0, 1, 2)
-        
+
         # Управление улучшением отдельных ROI‑фрагментов (окон "Предсказание модели")
-        row = 2
+        row = 0
         fragments_layout.addWidget(QLabel("Улучшение фрагментов (ROI):"), row, 0, 1, 2)
         row += 1
         
@@ -285,10 +274,7 @@ class MainInterface(QMainWindow):
         # Группа настроек детекции
         settings_group = QGroupBox("Настройки детекции")
         settings_layout = QVBoxLayout(settings_group)
-        
-        self.detect_btn = QPushButton("Запустить детекцию")
-        settings_layout.addWidget(self.detect_btn)
-        
+
         self.save_results_btn = QPushButton("Сохранить результаты")
         settings_layout.addWidget(self.save_results_btn)
         
@@ -400,7 +386,7 @@ class MainInterface(QMainWindow):
         
         roi_layout.addWidget(QLabel("Тип анализа:"))
         self.roi_type_combo = QComboBox()
-        self.roi_type_combo.addItems(["Автоматическое выделение", "Ручное выделение", "По координатам"])
+        self.roi_type_combo.addItems(["Автоматическое выделение", "Ручное выделение"])
         roi_layout.addWidget(self.roi_type_combo)
         
         roi_layout.addWidget(QLabel("Чувствительность:"))
@@ -525,10 +511,7 @@ class MainInterface(QMainWindow):
         
         self.enhance_btn = QPushButton("Улучшить SAR снимок")
         enhance_layout.addWidget(self.enhance_btn)
-        # Полный конвейер: улучшение → ROI → YOLO‑классификация
-        self.enhance_pipeline_btn = QPushButton("Полный SAR пайплайн")
-        enhance_layout.addWidget(self.enhance_pipeline_btn)
-        
+
         layout.addWidget(enhance_group)
         
         # Группа информации о параметрах
@@ -554,10 +537,7 @@ class MainInterface(QMainWindow):
         # Группа предпросмотра
         preview_group = QGroupBox("Результаты")
         preview_layout = QVBoxLayout(preview_group)
-        
-        self.enhance_preview_btn = QPushButton("Предпросмотр")
-        preview_layout.addWidget(self.enhance_preview_btn)
-        
+
         self.enhance_save_btn = QPushButton("Сохранить улучшенное")
         preview_layout.addWidget(self.enhance_save_btn)
         
@@ -602,11 +582,6 @@ class MainInterface(QMainWindow):
         layout.addLayout(images_layout)
         
         return panel
-        
-    def update_confidence_label(self, value):
-        """Обновляет метку уверенности классификатора"""
-        confidence = value / 100.0
-        self.confidence_label.setText(f"{confidence:.2f}")
         
     def update_intensity_info(self, value):
         """Обновляет информацию об интенсивности"""

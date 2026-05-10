@@ -88,7 +88,8 @@ def setup_demo_data(interface):
     interface.lat_input.setText("55.82103")
     interface.lon_input.setText("49.16219")
     interface.scale_input.setValue(16)
-    interface.confidence_slider.setValue(35)
+    if hasattr(interface, "confidence_slider"):
+        interface.confidence_slider.setValue(35)
     
     # Загружаем первое изображение в различные вкладки
     first_img = os.path.join(img_dir, "1.jpg")

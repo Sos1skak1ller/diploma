@@ -53,9 +53,12 @@ class IntegrationBridge:
                 
     def handle_detection_request(self):
         """Обработка запроса на детекцию объектов"""
-        
-        # Получаем параметры из нового интерфейса
-        confidence = self.new_interface.confidence_slider.value() / 100.0
+
+        # Получаем параметры из нового интерфейса (слайдер уверенности удалён — используем значение по умолчанию)
+        if hasattr(self.new_interface, "confidence_slider"):
+            confidence = self.new_interface.confidence_slider.value() / 100.0
+        else:
+            confidence = 0.35
         
         # Получаем выбранные файлы
         selected_files = self.get_selected_files()
