@@ -17,8 +17,9 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QFrame,
@@ -230,11 +231,19 @@ class _RoiStagePage(_StagePageBase):
 
     title = "Этап 2 из 2 · Зоны интересов"
 
+    # Сигнал, что пользователь отредактировал регионы (например, удалил один из них).
+    # Визард слушает его, чтобы синхронизировать stage_outputs / итоговое превью.
+    regions_changed = pyqtSignal()
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
         self._regions: List[Dict[str, Any]] = []
         self._image_with_boxes: Optional[str] = None
+        # Базовое (без рамок) изображение, по которому считались ROI; нужно,
+        # чтобы перерисовывать превью при ручном удалении регионов.
+        self._base_image_path: Optional[str] = None
+        self._selected_region_index: Optional[int] = None
 
         group = QGroupBox("Настройки зон интересов")
         group_layout = QVBoxLayout(group)
@@ -279,9 +288,25 @@ class _RoiStagePage(_StagePageBase):
 
         results_group = QGroupBox("Результаты анализа")
         results_layout = QVBoxLayout(results_group)
+
+        self.results_count_label = QLabel("Найдено областей: —")
+        self.results_count_label.setStyleSheet("color: #cccccc;")
+        results_layout.addWidget(self.results_count_label)
+
+        self.results_hint_label = QLabel(
+            "Клик — подсветить область, двойной клик — удалить её."
+        )
+        self.results_hint_label.setStyleSheet("color: #888888; font-size: 11px;")
+        self.results_hint_label.setWordWrap(True)
+        results_layout.addWidget(self.results_hint_label)
+
         self.results_list = QListWidget()
         self.results_list.setMinimumHeight(160)
+        self.results_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.results_list.itemClicked.connect(self._on_item_clicked)
+        self.results_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         results_layout.addWidget(self.results_list)
+
         self.controls_layout.addWidget(results_group)
 
         self.controls_layout.addStretch()
@@ -318,24 +343,137 @@ class _RoiStagePage(_StagePageBase):
         )
         return self._worker
 
-    def populate_results(self, results: Dict[str, Any]) -> None:
+    def set_base_image(self, path: Optional[str]) -> None:
+        """Запомнить исходник этапа — нужен для перерисовки при ручных правках."""
+        self._base_image_path = path
+
+    def populate_results(
+        self,
+        results: Dict[str, Any],
+        base_image_path: Optional[str] = None,
+    ) -> None:
         self._regions = list(results.get("regions", []))
         self._image_with_boxes = results.get("image_with_boxes")
-        cnt = int(results.get("count", len(self._regions)))
-
-        self.results_list.clear()
-        self.results_list.addItem(QListWidgetItem(f"Найдено областей: {cnt}"))
-        for r in self._regions:
-            self.results_list.addItem(
-                QListWidgetItem(
-                    f"({r['x1']},{r['y1']})-({r['x2']},{r['y2']}): ярк. {r.get('brightness', 0):.1f}"
-                )
-            )
+        if base_image_path is not None:
+            self._base_image_path = base_image_path
+        self._selected_region_index = None
+        self._refresh_list_widget()
 
     def reset_results(self) -> None:
         self._regions = []
         self._image_with_boxes = None
+        self._selected_region_index = None
         self.results_list.clear()
+        self.results_count_label.setText("Найдено областей: —")
+
+    def _refresh_list_widget(self) -> None:
+        """Перезаполнить список регионов; индекс региона хранится в UserRole."""
+        self.results_list.blockSignals(True)
+        self.results_list.clear()
+        for idx, r in enumerate(self._regions):
+            text = (
+                f"({r['x1']},{r['y1']})-({r['x2']},{r['y2']}): "
+                f"ярк. {r.get('brightness', 0):.1f}"
+            )
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, idx)
+            self.results_list.addItem(item)
+        self.results_list.blockSignals(False)
+        self.results_count_label.setText(
+            f"Найдено областей: {len(self._regions)}"
+        )
+        if (
+            self._selected_region_index is not None
+            and 0 <= self._selected_region_index < self.results_list.count()
+        ):
+            self.results_list.setCurrentRow(self._selected_region_index)
+
+    def _render_with_regions(self, highlight_index: Optional[int]) -> Optional[str]:
+        """Перерисовать рамки на исходнике этапа и вернуть путь к новому файлу.
+
+        Невыделенные рамки — жёлтые, выделенный регион — красный.
+        """
+        if not self._base_image_path or not os.path.isfile(self._base_image_path):
+            return None
+        try:
+            import cv2  # lazy import — модуль визарда не зависит от cv2 напрямую
+        except Exception:
+            return None
+
+        img = cv2.imread(self._base_image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+        vis = img.copy() if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        for i, r in enumerate(self._regions):
+            try:
+                x1 = int(r["x1"]); y1 = int(r["y1"])
+                x2 = int(r["x2"]); y2 = int(r["y2"])
+            except Exception:
+                continue
+            mb = float(r.get("brightness", 0.0))
+            if highlight_index is not None and i == highlight_index:
+                color = (0, 0, 255)  # красный
+                thickness = 3
+            else:
+                color = (0, 255, 255)  # жёлтый
+                thickness = 2
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
+            cv2.putText(
+                vis, f"{mb:.1f}", (x1, max(0, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
+            )
+
+        out_dir = _project_tmp_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(self._base_image_path))[0]
+        out_path = os.path.join(out_dir, f"{base}_roi_edit.jpg")
+        try:
+            cv2.imwrite(out_path, vis)
+        except Exception:
+            return None
+        return out_path
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        idx = item.data(Qt.UserRole)
+        if not isinstance(idx, int) or not (0 <= idx < len(self._regions)):
+            return
+        self._selected_region_index = idx
+        new_path = self._render_with_regions(idx)
+        if new_path:
+            self._image_with_boxes = new_path
+            self.show_image(new_path)
+            # Сообщаем визарду, чтобы он подменил stage_outputs текущим превью —
+            # тогда при возврате на этот шаг будет видна актуальная картинка.
+            self.regions_changed.emit()
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        idx = item.data(Qt.UserRole)
+        if not isinstance(idx, int) or not (0 <= idx < len(self._regions)):
+            return
+        r = self._regions[idx]
+        text = (
+            f"Удалить область ({r['x1']},{r['y1']})-({r['x2']},{r['y2']}), "
+            f"яркость {r.get('brightness', 0):.1f}?"
+        )
+        btn = QMessageBox.question(
+            self,
+            "Удалить область",
+            text,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if btn != QMessageBox.Yes:
+            return
+
+        del self._regions[idx]
+        self._selected_region_index = None
+        self._refresh_list_widget()
+
+        new_path = self._render_with_regions(None)
+        if new_path:
+            self._image_with_boxes = new_path
+            self.show_image(new_path)
+        self.regions_changed.emit()
 
     @property
     def regions(self) -> List[Dict[str, Any]]:
@@ -435,6 +573,10 @@ class PipelineWizardDialog(QDialog):
         self.apply_btn.clicked.connect(self._apply_current_stage)
         self.next_btn.clicked.connect(self._go_next)
         self.cancel_btn.clicked.connect(self.reject)
+
+        # Синхронизация stage_outputs при ручном редактировании регионов
+        # (одиночный клик подсвечивает регион, двойной — удаляет).
+        self.roi_page.regions_changed.connect(self._on_roi_regions_changed)
 
     # ---------- state helpers ----------
 
@@ -608,7 +750,12 @@ class PipelineWizardDialog(QDialog):
     @pyqtSlot(dict)
     def _on_roi_finished(self, results: Dict[str, Any]) -> None:
         self._set_busy(False)
-        self.roi_page.populate_results(results)
+        # Базовое (без рамок) изображение — это вход этого этапа; нужен,
+        # чтобы можно было перерисовать рамки при удалении области руками.
+        self.roi_page.populate_results(
+            results,
+            base_image_path=self._stage_inputs[_STAGE_ROI],
+        )
         preview = results.get("image_with_boxes") or self._stage_inputs[_STAGE_ROI]
         if preview and os.path.isfile(preview):
             self.roi_page.show_image(preview)
@@ -620,8 +767,20 @@ class PipelineWizardDialog(QDialog):
             self.status_label.setText("Зон не найдено. Поправьте параметры и попробуйте снова.")
         else:
             self.status_label.setText(
-                f"Найдено зон: {cnt}. Можно нажать «Готово» — запустится YOLOv11m."
+                f"Найдено зон: {cnt}. Кликните по строке, чтобы подсветить область, "
+                f"двойной клик — удалить. «Готово» запустит YOLOv11m."
             )
+
+    def _on_roi_regions_changed(self) -> None:
+        """Обновляем выход этапа, когда пользователь редактирует регионы."""
+        preview = self.roi_page.image_with_boxes
+        if preview and os.path.isfile(preview):
+            self._stage_outputs[_STAGE_ROI] = preview
+        cnt = len(self.roi_page.regions)
+        self.status_label.setText(
+            f"Областей после правок: {cnt}. Можно продолжать редактирование "
+            f"или нажать «Готово»."
+        )
 
     @pyqtSlot(str)
     def _on_worker_error(self, message: str) -> None:
