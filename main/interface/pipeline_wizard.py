@@ -17,11 +17,15 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtCore import QRectF, Qt, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QColor, QPen
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QFrame,
+    QGraphicsRectItem,
+    QGraphicsView,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -41,6 +45,112 @@ from PyQt5.QtWidgets import (
 )
 
 from .view import MyGraphicsView
+
+
+class _RoiEditableGraphicsView(MyGraphicsView):
+    """Подкласс ``MyGraphicsView`` с режимом ручного рисования прямоугольников.
+
+    В обычном режиме поведение унаследовано от родителя (ПКМ-пан, колесо-зум).
+    В draw-режиме ЛКМ-drag создаёт временную «черновую» рамку на сцене; на
+    release нормализованные координаты сцены (которые 1:1 совпадают с
+    пиксельными координатами изображения) эмитятся сигналом ``region_drawn``,
+    и режим автоматически выключается.
+    """
+
+    region_drawn = pyqtSignal(int, int, int, int)
+    draw_mode_changed = pyqtSignal(bool)
+
+    _MIN_BOX_SIZE = 6  # px по каждой стороне; меньшее молча игнорируем
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._draw_mode: bool = False
+        self._drawing: bool = False
+        self._draw_start = None  # QPointF в координатах сцены или None
+        self._rubber: Optional[QGraphicsRectItem] = None
+
+    def set_draw_mode(self, enabled: bool) -> None:
+        if enabled == self._draw_mode:
+            return
+        self._draw_mode = enabled
+        if enabled:
+            self.setDragMode(QGraphicsView.NoDrag)
+            self.setCursor(Qt.CrossCursor)
+            self.setFocus(Qt.OtherFocusReason)
+        else:
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            self.setCursor(Qt.ArrowCursor)
+        self._cleanup_rubber()
+        self.draw_mode_changed.emit(enabled)
+
+    def _cleanup_rubber(self) -> None:
+        if self._rubber is not None:
+            try:
+                self.scene.removeItem(self._rubber)
+            except Exception:
+                pass
+            self._rubber = None
+        self._drawing = False
+        self._draw_start = None
+
+    def _make_rubber(self, rect: QRectF) -> QGraphicsRectItem:
+        item = QGraphicsRectItem(rect)
+        pen = QPen(QColor(0, 255, 0))
+        pen.setWidth(2)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        return item
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if self._draw_mode and event.button() == Qt.LeftButton:
+            start = self.mapToScene(event.pos())
+            self._draw_start = start
+            self._drawing = True
+            self._rubber = self._make_rubber(QRectF(start, start))
+            self.scene.addItem(self._rubber)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        if self._drawing and self._rubber is not None and self._draw_start is not None:
+            cur = self.mapToScene(event.pos())
+            rect = QRectF(self._draw_start, cur).normalized()
+            self._rubber.setRect(rect)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        if self._drawing and event.button() == Qt.LeftButton:
+            cur = self.mapToScene(event.pos())
+            start = self._draw_start
+            self._cleanup_rubber()
+            self.set_draw_mode(False)
+            event.accept()
+            if start is None:
+                return
+            scene_rect = self.scene.sceneRect()
+            x1 = int(round(min(start.x(), cur.x())))
+            y1 = int(round(min(start.y(), cur.y())))
+            x2 = int(round(max(start.x(), cur.x())))
+            y2 = int(round(max(start.y(), cur.y())))
+            x1 = max(0, min(int(scene_rect.width()), x1))
+            y1 = max(0, min(int(scene_rect.height()), y1))
+            x2 = max(0, min(int(scene_rect.width()), x2))
+            y2 = max(0, min(int(scene_rect.height()), y2))
+            if (x2 - x1) >= self._MIN_BOX_SIZE and (y2 - y1) >= self._MIN_BOX_SIZE:
+                self.region_drawn.emit(x1, y1, x2, y2)
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if self._draw_mode and event.key() == Qt.Key_Escape:
+            self._cleanup_rubber()
+            self.set_draw_mode(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 _STAGE_ENHANCE = 0
@@ -81,10 +191,14 @@ class _StagePageBase(QWidget):
         self.controls_layout.setContentsMargins(8, 8, 8, 8)
         root.addWidget(self.controls_panel)
 
-        self.preview = MyGraphicsView()
+        self.preview = self._make_preview()
         self.preview.setMinimumSize(560, 480)
         self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root.addWidget(self.preview, stretch=1)
+
+    def _make_preview(self) -> MyGraphicsView:
+        """Фабрика виджета превью; подклассы могут вернуть кастомный класс."""
+        return MyGraphicsView()
 
     def show_image(self, path: Optional[str]) -> None:
         if path and os.path.isfile(path):
@@ -230,11 +344,31 @@ class _RoiStagePage(_StagePageBase):
 
     title = "Этап 2 из 2 · Зоны интересов"
 
+    # Сигнал, что пользователь отредактировал регионы (например, удалил один из них
+    # или добавил вручную). Визард слушает его, чтобы синхронизировать stage_outputs
+    # и итоговое превью.
+    regions_changed = pyqtSignal()
+
+    def _make_preview(self) -> MyGraphicsView:
+        return _RoiEditableGraphicsView()
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
         self._regions: List[Dict[str, Any]] = []
         self._image_with_boxes: Optional[str] = None
+        # Базовое (без рамок) изображение, по которому считались ROI; нужно,
+        # чтобы перерисовывать превью при ручном удалении/добавлении регионов.
+        self._base_image_path: Optional[str] = None
+        # Кеш grayscale-копии базового изображения для быстрого расчёта яркости
+        # при добавлении ручных регионов.
+        self._base_gray = None  # numpy.ndarray | None
+        self._selected_region_index: Optional[int] = None
+
+        # Сигналы редактируемого превью пробрасываем в обработчики страницы.
+        if isinstance(self.preview, _RoiEditableGraphicsView):
+            self.preview.region_drawn.connect(self._on_region_drawn)
+            self.preview.draw_mode_changed.connect(self._on_draw_mode_changed)
 
         group = QGroupBox("Настройки зон интересов")
         group_layout = QVBoxLayout(group)
@@ -279,9 +413,35 @@ class _RoiStagePage(_StagePageBase):
 
         results_group = QGroupBox("Результаты анализа")
         results_layout = QVBoxLayout(results_group)
+
+        self.results_count_label = QLabel("Найдено областей: —")
+        self.results_count_label.setStyleSheet("color: #cccccc;")
+        results_layout.addWidget(self.results_count_label)
+
+        self.results_hint_label = QLabel(
+            "Клик — подсветить область, двойной клик — удалить её."
+        )
+        self.results_hint_label.setStyleSheet("color: #888888; font-size: 11px;")
+        self.results_hint_label.setWordWrap(True)
+        results_layout.addWidget(self.results_hint_label)
+
+        self.add_region_btn = QPushButton("Добавить область")
+        self.add_region_btn.setCheckable(True)
+        self.add_region_btn.setEnabled(False)
+        self.add_region_btn.setToolTip(
+            "Левая кнопка мыши — нарисовать рамку. Esc — отмена. "
+            "После одной рамки режим выключится автоматически."
+        )
+        self.add_region_btn.toggled.connect(self._on_add_region_toggled)
+        results_layout.addWidget(self.add_region_btn)
+
         self.results_list = QListWidget()
         self.results_list.setMinimumHeight(160)
+        self.results_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.results_list.itemClicked.connect(self._on_item_clicked)
+        self.results_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         results_layout.addWidget(self.results_list)
+
         self.controls_layout.addWidget(results_group)
 
         self.controls_layout.addStretch()
@@ -318,24 +478,212 @@ class _RoiStagePage(_StagePageBase):
         )
         return self._worker
 
-    def populate_results(self, results: Dict[str, Any]) -> None:
+    def set_base_image(self, path: Optional[str]) -> None:
+        """Запомнить исходник этапа — нужен для перерисовки при ручных правках.
+
+        Дополнительно кеширует grayscale-копию изображения для расчёта яркости
+        ручных регионов и включает/выключает кнопку «Добавить область».
+        """
+        self._base_image_path = path
+        self._base_gray = None
+        valid = bool(path) and os.path.isfile(path or "")
+        if valid:
+            try:
+                import cv2  # ленивый импорт
+                gray = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                if gray is not None:
+                    self._base_gray = gray
+            except Exception:
+                self._base_gray = None
+        if hasattr(self, "add_region_btn"):
+            self.add_region_btn.setEnabled(valid)
+
+    def populate_results(
+        self,
+        results: Dict[str, Any],
+        base_image_path: Optional[str] = None,
+    ) -> None:
+        # Любая активная сессия рисования сбрасывается, чтобы кнопка не залипала.
+        if isinstance(self.preview, _RoiEditableGraphicsView):
+            self.preview.set_draw_mode(False)
+
         self._regions = list(results.get("regions", []))
         self._image_with_boxes = results.get("image_with_boxes")
-        cnt = int(results.get("count", len(self._regions)))
-
-        self.results_list.clear()
-        self.results_list.addItem(QListWidgetItem(f"Найдено областей: {cnt}"))
-        for r in self._regions:
-            self.results_list.addItem(
-                QListWidgetItem(
-                    f"({r['x1']},{r['y1']})-({r['x2']},{r['y2']}): ярк. {r.get('brightness', 0):.1f}"
-                )
-            )
+        if base_image_path is not None:
+            self.set_base_image(base_image_path)
+        self._selected_region_index = None
+        self._refresh_list_widget()
 
     def reset_results(self) -> None:
+        if isinstance(self.preview, _RoiEditableGraphicsView):
+            self.preview.set_draw_mode(False)
         self._regions = []
         self._image_with_boxes = None
+        self._selected_region_index = None
         self.results_list.clear()
+        self.results_count_label.setText("Найдено областей: —")
+
+    def _refresh_list_widget(self) -> None:
+        """Перезаполнить список регионов; индекс региона хранится в UserRole."""
+        self.results_list.blockSignals(True)
+        self.results_list.clear()
+        for idx, r in enumerate(self._regions):
+            text = (
+                f"({r['x1']},{r['y1']})-({r['x2']},{r['y2']}): "
+                f"ярк. {r.get('brightness', 0):.1f}"
+            )
+            if r.get("source") == "manual":
+                text += " (вручную)"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, idx)
+            self.results_list.addItem(item)
+        self.results_list.blockSignals(False)
+        self.results_count_label.setText(
+            f"Найдено областей: {len(self._regions)}"
+        )
+        if (
+            self._selected_region_index is not None
+            and 0 <= self._selected_region_index < self.results_list.count()
+        ):
+            self.results_list.setCurrentRow(self._selected_region_index)
+
+    def _render_with_regions(self, highlight_index: Optional[int]) -> Optional[str]:
+        """Перерисовать рамки на исходнике этапа и вернуть путь к новому файлу.
+
+        Цвета: выделенный — красный, ручные — зелёные, авто — жёлтые.
+        """
+        if not self._base_image_path or not os.path.isfile(self._base_image_path):
+            return None
+        try:
+            import cv2  # lazy import — модуль визарда не зависит от cv2 напрямую
+        except Exception:
+            return None
+
+        img = cv2.imread(self._base_image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+        vis = img.copy() if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        for i, r in enumerate(self._regions):
+            try:
+                x1 = int(r["x1"]); y1 = int(r["y1"])
+                x2 = int(r["x2"]); y2 = int(r["y2"])
+            except Exception:
+                continue
+            mb = float(r.get("brightness", 0.0))
+            if highlight_index is not None and i == highlight_index:
+                color = (0, 0, 255)  # красный
+                thickness = 3
+            elif r.get("source") == "manual":
+                color = (0, 255, 0)  # зелёный для ручных
+                thickness = 2
+            else:
+                color = (0, 255, 255)  # жёлтый для авто
+                thickness = 2
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
+            cv2.putText(
+                vis, f"{mb:.1f}", (x1, max(0, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
+            )
+
+        out_dir = _project_tmp_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(self._base_image_path))[0]
+        out_path = os.path.join(out_dir, f"{base}_roi_edit.jpg")
+        try:
+            cv2.imwrite(out_path, vis)
+        except Exception:
+            return None
+        return out_path
+
+    def _on_add_region_toggled(self, checked: bool) -> None:
+        """Слот клика по toggle-кнопке: переводим превью в режим рисования."""
+        if not isinstance(self.preview, _RoiEditableGraphicsView):
+            return
+        # Если включают режим без валидного исходника — отжимаем кнопку обратно.
+        if checked and not (self._base_image_path and os.path.isfile(self._base_image_path)):
+            self.add_region_btn.blockSignals(True)
+            self.add_region_btn.setChecked(False)
+            self.add_region_btn.blockSignals(False)
+            return
+        self.preview.set_draw_mode(checked)
+
+    def _on_draw_mode_changed(self, enabled: bool) -> None:
+        """Синхронизирует состояние кнопки при авто-выходе/Esc из режима."""
+        if self.add_region_btn.isChecked() == enabled:
+            return
+        self.add_region_btn.blockSignals(True)
+        self.add_region_btn.setChecked(enabled)
+        self.add_region_btn.blockSignals(False)
+
+    def _on_region_drawn(self, x1: int, y1: int, x2: int, y2: int) -> None:
+        """Добавить нарисованный регион в список и обновить превью."""
+        if not (self._base_image_path and os.path.isfile(self._base_image_path)):
+            return
+        bm = 0.0
+        if self._base_gray is not None:
+            try:
+                patch = self._base_gray[y1:y2, x1:x2]
+                if patch.size:
+                    bm = float(patch.mean())
+            except Exception:
+                bm = 0.0
+        self._regions.append({
+            "x1": int(x1),
+            "y1": int(y1),
+            "x2": int(x2),
+            "y2": int(y2),
+            "brightness": bm,
+            "source": "manual",
+        })
+        self._selected_region_index = None
+        self._refresh_list_widget()
+        new_path = self._render_with_regions(None)
+        if new_path:
+            self._image_with_boxes = new_path
+            self.show_image(new_path)
+        self.regions_changed.emit()
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        idx = item.data(Qt.UserRole)
+        if not isinstance(idx, int) or not (0 <= idx < len(self._regions)):
+            return
+        self._selected_region_index = idx
+        new_path = self._render_with_regions(idx)
+        if new_path:
+            self._image_with_boxes = new_path
+            self.show_image(new_path)
+            # Сообщаем визарду, чтобы он подменил stage_outputs текущим превью —
+            # тогда при возврате на этот шаг будет видна актуальная картинка.
+            self.regions_changed.emit()
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        idx = item.data(Qt.UserRole)
+        if not isinstance(idx, int) or not (0 <= idx < len(self._regions)):
+            return
+        r = self._regions[idx]
+        text = (
+            f"Удалить область ({r['x1']},{r['y1']})-({r['x2']},{r['y2']}), "
+            f"яркость {r.get('brightness', 0):.1f}?"
+        )
+        btn = QMessageBox.question(
+            self,
+            "Удалить область",
+            text,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if btn != QMessageBox.Yes:
+            return
+
+        del self._regions[idx]
+        self._selected_region_index = None
+        self._refresh_list_widget()
+
+        new_path = self._render_with_regions(None)
+        if new_path:
+            self._image_with_boxes = new_path
+            self.show_image(new_path)
+        self.regions_changed.emit()
 
     @property
     def regions(self) -> List[Dict[str, Any]]:
@@ -436,6 +784,10 @@ class PipelineWizardDialog(QDialog):
         self.next_btn.clicked.connect(self._go_next)
         self.cancel_btn.clicked.connect(self.reject)
 
+        # Синхронизация stage_outputs при ручном редактировании регионов
+        # (одиночный клик подсвечивает регион, двойной — удаляет).
+        self.roi_page.regions_changed.connect(self._on_roi_regions_changed)
+
     # ---------- state helpers ----------
 
     def _current_input_path(self) -> str:
@@ -454,6 +806,13 @@ class PipelineWizardDialog(QDialog):
 
         # Preview shows the most recent output for this stage (or stage input).
         page.show_image(self._current_effective_path())
+
+        # На входе в ROI-этап даём странице знать, какое именно изображение
+        # использовать для перерисовки рамок и расчёта яркости при ручных правках.
+        # Это также включает кнопку «Добавить область», даже если пользователь
+        # ещё ни разу не нажимал «Применить».
+        if self._current_stage == _STAGE_ROI:
+            self.roi_page.set_base_image(self._stage_inputs[_STAGE_ROI])
 
         # Progress / status
         self.progress_bar.setVisible(False)
@@ -481,6 +840,18 @@ class PipelineWizardDialog(QDialog):
             self.cancel_btn,
         ):
             btn.setEnabled(not busy)
+        # Кнопка ручного добавления области — только во время простоя ROI-этапа.
+        if hasattr(self, "roi_page") and hasattr(self.roi_page, "add_region_btn"):
+            if busy:
+                # При запуске воркера выходим из draw-режима и блокируем кнопку.
+                if isinstance(self.roi_page.preview, _RoiEditableGraphicsView):
+                    self.roi_page.preview.set_draw_mode(False)
+                self.roi_page.add_region_btn.setEnabled(False)
+            else:
+                base = self.roi_page._base_image_path
+                self.roi_page.add_region_btn.setEnabled(
+                    bool(base) and os.path.isfile(base or "")
+                )
         if busy:
             self.progress_bar.setVisible(True)
         else:
@@ -608,7 +979,12 @@ class PipelineWizardDialog(QDialog):
     @pyqtSlot(dict)
     def _on_roi_finished(self, results: Dict[str, Any]) -> None:
         self._set_busy(False)
-        self.roi_page.populate_results(results)
+        # Базовое (без рамок) изображение — это вход этого этапа; нужен,
+        # чтобы можно было перерисовать рамки при удалении области руками.
+        self.roi_page.populate_results(
+            results,
+            base_image_path=self._stage_inputs[_STAGE_ROI],
+        )
         preview = results.get("image_with_boxes") or self._stage_inputs[_STAGE_ROI]
         if preview and os.path.isfile(preview):
             self.roi_page.show_image(preview)
@@ -620,8 +996,20 @@ class PipelineWizardDialog(QDialog):
             self.status_label.setText("Зон не найдено. Поправьте параметры и попробуйте снова.")
         else:
             self.status_label.setText(
-                f"Найдено зон: {cnt}. Можно нажать «Готово» — запустится YOLOv11m."
+                f"Найдено зон: {cnt}. Кликните по строке, чтобы подсветить область, "
+                f"двойной клик — удалить. «Готово» запустит YOLOv11m."
             )
+
+    def _on_roi_regions_changed(self) -> None:
+        """Обновляем выход этапа, когда пользователь редактирует регионы."""
+        preview = self.roi_page.image_with_boxes
+        if preview and os.path.isfile(preview):
+            self._stage_outputs[_STAGE_ROI] = preview
+        cnt = len(self.roi_page.regions)
+        self.status_label.setText(
+            f"Областей после правок: {cnt}. Можно продолжать редактирование "
+            f"или нажать «Готово»."
+        )
 
     @pyqtSlot(str)
     def _on_worker_error(self, message: str) -> None:
